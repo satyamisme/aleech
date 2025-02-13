@@ -62,7 +62,7 @@ google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
 gunicorn
-git+https://github.com/MAHESH-KADALI/lk21.git
+#git+https://github.com/MAHESH-KADALI/lk21.git
 httpx
 langcodes[data]
 lxml
