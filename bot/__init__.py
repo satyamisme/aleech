@@ -83,7 +83,9 @@ VID_MODE = {'vid_vid': 'Video + Video',
             'watermark': 'Watermark',
             'extract': 'Extract',
             'trim': 'Trim',
-            'rmstream': 'Remove Stream'}
+            'rmstream': 'Remove Stream',
+            'merge_rmaudio': 'Merge and Remove Audio',
+            'merge_preremove_audio': 'Merge with Pre-Remove Audio'}
 
 DEFAULT_SPLIT_SIZE = 2097151000
 ARIA_NAME = environ.get('ARIA_NAME', 'aria2c')
