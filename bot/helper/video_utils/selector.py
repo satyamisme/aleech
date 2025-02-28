@@ -133,7 +133,6 @@ class SelectMode:
                     if self.mode == 'watermark':
                         buttons.button_data(f"{'🔥 ' if await aiopath.exists(self.extra_data.get('subfile', '')) else ''}Sub File", 'vidtool subfile', 'header')
                     buttons.button_data('Font Style', 'vidtool fontstyle', 'header')
-
             if self.mode in ('compress', 'watermark') or self.extra_data.get('hardsub'):
                 buttons.button_data('Quality', 'vidtool quality', 'header')
             if self.mode == 'watermark':
