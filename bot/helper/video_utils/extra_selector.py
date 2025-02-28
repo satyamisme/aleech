@@ -6,6 +6,7 @@ from pyrogram.filters import regex, user
 from pyrogram.handlers import CallbackQueryHandler
 from pyrogram.types import CallbackQuery
 from time import time
+import os  # Added missing import for ospath
 
 from bot import VID_MODE
 from bot.helper.ext_utils.bot_utils import new_thread
@@ -141,7 +142,7 @@ class ExtraSelect:
 
         text = (f"<b>Merge with Pre-Remove Audio ~ {self._listener.tag}</b>\n"
                 f"Total Size: <b>{get_readable_file_size(self.executor.size)}</b>\n"
-                f"File {file_page + 1} of {total_files}: <code>{ospath.basename(current_file)}</code>\n")
+                f"File {file_page + 1} of {total_files}: <code>{os.path.basename(current_file)}</code>\n")
         
         if audio_streams:
             text += f"Audio Tracks (Page {track_page + 1} of {total_track_pages}):\n"
@@ -337,7 +338,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             total_pages = (len([s for s in obj.executor.data['streams_per_file'][current_file] 
                                if s['codec_type'] == 'audio']) + 4) // 5
             obj.executor.data['track_page'] = min(total_pages - 1, obj.executor.data.get('track_page', 0) + 1)
-            await obj.merge_preremove_audio_select(obj.executor.data['streams_per_file'])
+            await obj.merge_preremote_audio_select(obj.executor.data['streams_per_file'])
         else:
             file, action = data[2], data[3]
             if file not in obj.executor.data['audio_selections']:
