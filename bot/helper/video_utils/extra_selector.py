@@ -6,7 +6,7 @@ from pyrogram.filters import regex, user
 from pyrogram.handlers import CallbackQueryHandler
 from pyrogram.types import CallbackQuery
 from time import time
-import os  # Added missing import for ospath
+import os
 
 from bot import VID_MODE
 from bot.helper.ext_utils.bot_utils import new_thread
@@ -105,22 +105,43 @@ class ExtraSelect:
         text += f'\n\n<i>Time Out: {get_readable_time(180 - (time()-self._time))}</i>'
         return text, buttons.build_menu(2)
 
-    async def merge_rmaudio_select(self, streams: dict):
-        self.executor.data = {'streams': {}, 'audio_remove': []}
-        buttons = ButtonMaker()
-        for stream in streams:
-            if stream['codec_type'] == 'audio':
-                index, lang = stream['index'], stream.get('tags', {}).get('language', str(stream['index']))
-                self.executor.data['streams'][index] = {'map': index, 'type': 'audio', 'lang': lang}
-                buttons.button_data(f"Audio ~ {lang.upper()}", f"extra merge_rmaudio {index}")
-        buttons.button_data("Remove All Audio", "extra merge_rmaudio all")
-        buttons.button_data("Continue (Keep All)", "extra merge_rmaudio continue", 'footer')
-        buttons.button_data("Cancel", "extra cancel", 'footer')
-        text = (f"<b>Merge and Remove Audio ~ {self._listener.tag}</b>\n"
-                f"<code>{self.executor.name}</code>\n"
-                f"File Size: <b>{get_readable_file_size(self.executor.size)}</b>\n\n"
-                "Select audio streams to remove from merged file:")
-        await self.update_message(text, buttons.build_menu(2))
+    async def merge_rmaudio_select(self, streams):
+        # Ensure streams is a list of dicts or None; initialize only if streams is provided
+        if streams is not None and isinstance(streams, (list, tuple)):
+            self.executor.data['streams'] = {}
+            self.executor.data['audio_remove'] = []
+            buttons = ButtonMaker()
+            for stream in streams:
+                if isinstance(stream, dict) and stream.get('codec_type') == 'audio':
+                    index = stream['index']
+                    lang = stream.get('tags', {}).get('language', str(index))
+                    self.executor.data['streams'][index] = {'map': index, 'type': 'audio', 'lang': lang}
+                    buttons.button_data(f"Audio ~ {lang.upper()}", f"extra merge_rmaudio {index}")
+            buttons.button_data("Remove All Audio", "extra merge_rmaudio all")
+            buttons.button_data("Continue (Keep All)", "extra merge_rmaudio continue", 'footer')
+            buttons.button_data("Cancel", "extra cancel", 'footer')
+            text = (f"<b>Merge and Remove Audio ~ {self._listener.tag}</b>\n"
+                    f"<code>{self.executor.name}</code>\n"
+                    f"File Size: <b>{get_readable_file_size(self.executor.size)}</b>\n\n"
+                    "Select audio streams to remove from merged file:")
+            await self.update_message(text, buttons.build_menu(2))
+        else:
+            # If called from cb_extra, update UI with existing selections
+            buttons = ButtonMaker()
+            for index, stream in self.executor.data.get('streams', {}).items():
+                if stream['type'] == 'audio':
+                    selected = index in self.executor.data.get('audio_remove', [])
+                    buttons.button_data(f"{'🔥 ' if selected else ''}Audio ~ {stream['lang'].upper()}", 
+                                       f"extra merge_rmaudio {index}")
+            buttons.button_data("Remove All Audio" if self.executor.data.get('audio_remove') != 'all' else "🔥 Remove All Audio", 
+                               "extra merge_rmaudio all")
+            buttons.button_data("Continue (Keep All)", "extra merge_rmaudio continue", 'footer')
+            buttons.button_data("Cancel", "extra cancel", 'footer')
+            text = (f"<b>Merge and Remove Audio ~ {self._listener.tag}</b>\n"
+                    f"<code>{self.executor.name}</code>\n"
+                    f"File Size: <b>{get_readable_file_size(self.executor.size)}</b>\n\n"
+                    "Select audio streams to remove from merged file:")
+            await self.update_message(text, buttons.build_menu(2))
 
     async def merge_preremove_audio_select(self, streams_per_file: dict):
         self.executor.data.setdefault('audio_selections', {})
@@ -222,7 +243,7 @@ class ExtraSelect:
         index = 1
         if not self.status:
             for possition, file in self.executor.data['list'].items():
-                if (await get_document_type(ospath.join(self.executor.path, file)))[0] or file.endswith(('.srt', '.ass')):
+                if (await exc.get_document_type(os.path.join(self.executor.path, file)))[0] or file.endswith(('.srt', '.ass')):
                     self.executor.data['list'].update({index: file})
                     index += 1
             if not self.executor.data['list']:
@@ -235,8 +256,8 @@ class ExtraSelect:
             if not self.data or not self.data['final']:
                 return self.executor._up_path
             for key in self.data['final'].values():
-                sub_files.append(ospath.join(self.executor.path, key['file']))
-                ref_files.append(ospath.join(self.executor.path, key['ref']))
+                sub_files.append(os.path.join(self.executor.path, key['file']))
+                ref_files.append(os.path.join(self.executor.path, key['ref']))
         else:
             file: dict = self.executor.data['list'][self.status]
             text = (f'Current: <b>{file}</b>\n'
@@ -312,11 +333,13 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             obj.event.set()
         else:
             mapindex = int(data[2])
-            if mapindex in obj.executor.data['audio_remove']:
-                obj.executor.data['audio_remove'].remove(mapindex)
+            audio_remove = obj.executor.data.get('audio_remove', [])
+            if mapindex in audio_remove:
+                audio_remove.remove(mapindex)
             else:
-                obj.executor.data['audio_remove'].append(mapindex)
-            await obj.merge_rmaudio_select(obj.executor.data['streams'])
+                audio_remove.append(mapindex)
+            obj.executor.data['audio_remove'] = audio_remove
+            await obj.merge_rmaudio_select(None)  # Pass None to update UI with current selections
     elif mode == 'merge_preremove_audio':
         files = list(obj.executor.data['streams_per_file'].keys())
         current_file = obj.status or files[0] if files else None
@@ -338,7 +361,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             total_pages = (len([s for s in obj.executor.data['streams_per_file'][current_file] 
                                if s['codec_type'] == 'audio']) + 4) // 5
             obj.executor.data['track_page'] = min(total_pages - 1, obj.executor.data.get('track_page', 0) + 1)
-            await obj.merge_preremote_audio_select(obj.executor.data['streams_per_file'])
+            await obj.merge_preremove_audio_select(obj.executor.data['streams_per_file'])
         else:
             file, action = data[2], data[3]
             if file not in obj.executor.data['audio_selections']:
