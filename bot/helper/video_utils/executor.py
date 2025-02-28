@@ -31,7 +31,7 @@ async def get_metavideo(video_file):
 
 class VidEcxecutor(FFProgress):
     def __init__(self, listener: task.TaskListener, path: str, gid: str, metadata=False):
-        self.data = None
+        self.data = {}  # Fixed initialization
         self.event = Event()
         self.listener = listener
         self.path = path
