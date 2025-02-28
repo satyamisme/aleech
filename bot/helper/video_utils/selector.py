@@ -21,8 +21,7 @@ from bot.helper.telegram_helper.button_build import ButtonMaker
 from bot.helper.telegram_helper.filters import CustomFilters
 from bot.helper.telegram_helper.message_utils import sendMessage, editMessage, deleteMessage
 
-
-class SelectMode():
+class SelectMode:
     def __init__(self, listener: task.TaskListener, isLink=False):
         self._isLink = isLink
         self._time = time()
@@ -206,7 +205,6 @@ class SelectMode():
         await deleteMessage(self._reply)
         return [self.mode, self.newname, self.extra_data]
 
-
 async def message_handler(_, message: Message, obj: SelectMode, is_sub=False):
     data = None
     if obj.is_rename and message.text:
@@ -234,7 +232,6 @@ async def message_handler(_, message: Message, obj: SelectMode, is_sub=False):
             return
     obj.message_event.set()
     await gather(obj.list_buttons(data), deleteMessage(message))
-
 
 @new_task
 async def cb_vidtools(_, query: CallbackQuery, obj: SelectMode):
