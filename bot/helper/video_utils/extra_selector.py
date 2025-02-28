@@ -14,7 +14,6 @@ from bot.helper.telegram_helper.button_build import ButtonMaker
 from bot.helper.telegram_helper.message_utils import sendMessage, editMessage, deleteMessage
 from bot.helper.video_utils import executor as exc
 
-
 class ExtraSelect:
     def __init__(self, executor: exc.VidEcxecutor):
         self._listener = executor.listener
@@ -23,7 +22,7 @@ class ExtraSelect:
         self.executor = executor
         self.event = Event()
         self.is_cancel = False
-        self.extension: list[str] = [None, None, 'mkv']
+        self.extension = [None, None, 'mkv']
         self.status = ''
 
     @new_thread
@@ -105,6 +104,76 @@ class ExtraSelect:
         text += f'\n\n<i>Time Out: {get_readable_time(180 - (time()-self._time))}</i>'
         return text, buttons.build_menu(2)
 
+    async def merge_rmaudio_select(self, streams: dict):
+        self.executor.data = {'streams': {}, 'audio_remove': []}
+        buttons = ButtonMaker()
+        for stream in streams:
+            if stream['codec_type'] == 'audio':
+                index, lang = stream['index'], stream.get('tags', {}).get('language', str(stream['index']))
+                self.executor.data['streams'][index] = {'map': index, 'type': 'audio', 'lang': lang}
+                buttons.button_data(f"Audio ~ {lang.upper()}", f"extra merge_rmaudio {index}")
+        buttons.button_data("Remove All Audio", "extra merge_rmaudio all")
+        buttons.button_data("Continue (Keep All)", "extra merge_rmaudio continue", 'footer')
+        buttons.button_data("Cancel", "extra cancel", 'footer')
+        text = (f"<b>Merge and Remove Audio ~ {self._listener.tag}</b>\n"
+                f"<code>{self.executor.name}</code>\n"
+                f"File Size: <b>{get_readable_file_size(self.executor.size)}</b>\n\n"
+                "Select audio streams to remove from merged file:")
+        await self.update_message(text, buttons.build_menu(2))
+
+    async def merge_preremove_audio_select(self, streams_per_file: dict):
+        self.executor.data.setdefault('audio_selections', {})
+        self.executor.data['streams_per_file'] = streams_per_file
+        buttons = ButtonMaker()
+        
+        files = list(streams_per_file.keys())
+        file_page = self.executor.data.get('file_page', 0)
+        current_file = files[file_page] if files else None
+        total_files = len(files)
+        
+        audio_streams = [s for s in streams_per_file.get(current_file, []) if s['codec_type'] == 'audio']
+        tracks_per_page = 5
+        track_page = self.executor.data.get('track_page', 0)
+        total_track_pages = max(1, (len(audio_streams) + tracks_per_page - 1) // tracks_per_page)
+        start_idx = track_page * tracks_per_page
+        end_idx = min((track_page + 1) * tracks_per_page, len(audio_streams))
+        current_tracks = audio_streams[start_idx:end_idx]
+
+        text = (f"<b>Merge with Pre-Remove Audio ~ {self._listener.tag}</b>\n"
+                f"Total Size: <b>{get_readable_file_size(self.executor.size)}</b>\n"
+                f"File {file_page + 1} of {total_files}: <code>{ospath.basename(current_file)}</code>\n")
+        
+        if audio_streams:
+            text += f"Audio Tracks (Page {track_page + 1} of {total_track_pages}):\n"
+            selections = self.executor.data['audio_selections'].get(current_file, [])
+            for stream in current_tracks:
+                index, lang = stream['index'], stream.get('tags', {}).get('language', str(stream['index']))
+                selected = index in selections or selections == 'all'
+                buttons.button_data(f"{'🔥 ' if selected else ''}Audio ~ {lang.upper()}", 
+                                  f"extra merge_preremove_audio {current_file} {index}")
+            buttons.button_data(f"{'🔥 ' if selections == 'all' else ''}Remove All Audio", 
+                               f"extra merge_preremove_audio {current_file} all")
+        else:
+            text += "No audio streams in this file.\n"
+            self.executor.data['audio_selections'].setdefault(current_file, [])
+
+        if file_page > 0:
+            buttons.button_data("Previous File", "extra merge_preremove_audio prev_file", 'footer')
+        if file_page < total_files - 1:
+            buttons.button_data("Next File", "extra merge_preremove_audio next_file", 'footer')
+        elif file_page == total_files - 1:
+            buttons.button_data("Done", "extra merge_preremove_audio done", 'footer')
+
+        if total_track_pages > 1:
+            if track_page > 0:
+                buttons.button_data("Previous Tracks", "extra merge_preremove_audio prev_track", 'header')
+            if track_page < total_track_pages - 1:
+                buttons.button_data("Next Tracks", "extra merge_preremove_audio next_track", 'header')
+
+        buttons.button_data("Cancel", "extra cancel", 'footer')
+        text += f"\n<i>Time Out: {get_readable_time(180 - (time() - self._time))}</i>"
+        await self.update_message(text, buttons.build_menu(2))
+
     async def compress_select(self, streams: dict):
         self.executor.data = {}
         buttons = ButtonMaker()
@@ -152,17 +221,23 @@ class ExtraSelect:
         index = 1
         if not self.status:
             for possition, file in self.executor.data['list'].items():
-                if file.endswith(('srt', '.ass')):
-                    ref_file = self.executor.data['final'].get(possition, {}).get('ref', '')
-                    text += f'{index}. {file} {"🔥 " if ref_file else ""}\n'
-                    but_txt = f'🔥 {index}' if ref_file else index
-                    buttons.button_data(but_txt, f'extra subsync {possition}')
+                if (await get_document_type(ospath.join(self.executor.path, file)))[0] or file.endswith(('.srt', '.ass')):
+                    self.executor.data['list'].update({index: file})
                     index += 1
-            buttons.button_data('Cancel', 'extra cancel', 'footer')
-            if self.executor.data['final']:
-                buttons.button_data('Continue', 'extra subsync continue', 'footer')
+            if not self.executor.data['list']:
+                return self.executor._up_path
+            self._start_handler()
+            await gather(self._send_status(), self.event.wait())
+
+            if self.is_cancel:
+                return
+            if not self.data or not self.data['final']:
+                return self.executor._up_path
+            for key in self.data['final'].values():
+                sub_files.append(ospath.join(self.executor.path, key['file']))
+                ref_files.append(ospath.join(self.executor.path, key['ref']))
         else:
-            file: dict = self.executor.data['list'][self.status]
+            file = self.executor.data['list'][self.status]
             text = (f'Current: <b>{file}</b>\n'
                     f'References: <b>{ref}</b>\n' if (ref := self.executor.data['final'].get(self.status, {}).get('ref')) else ''
                     '\nSelect Available References Below!\n')
@@ -198,8 +273,20 @@ class ExtraSelect:
 
     async def get_buttons(self, *args):
         future = self._event_handler()
-        if extra_mode := getattr(self, f'{self.executor.mode}_select', None):
-            await extra_mode(*args)
+        if self.executor.mode == 'merge_rmaudio':
+            await self.merge_rmaudio_select(*args)
+        elif self.executor.mode == 'merge_preremove_audio':
+            await self.merge_preremove_audio_select(*args)
+        elif self.executor.mode == 'compress':
+            await self.compress_select(*args)
+        elif self.executor.mode == 'rmstream':
+            await self.rmstream_select(*args)
+        elif self.executor.mode == 'convert':
+            await self.convert_select(*args)
+        elif self.executor.mode == 'subsync':
+            await self.subsync_select()
+        elif self.executor.mode == 'extract':
+            await self.extract_select(*args)
         await wrap_future(future)
         self.executor.event.set()
         await deleteMessage(self._reply)
@@ -207,99 +294,134 @@ class ExtraSelect:
             self._listener.suproc = 'cancelled'
             await self._listener.onUploadError(f'{VID_MODE[self.executor.mode]} stopped by user!')
 
-
 async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
     data = query.data.split()
-    match data[1]:
-        case 'cancel':
-            await query.answer()
-            obj.is_cancel = obj.executor.is_cancel = True
-            obj.executor.data = None
+    mode = data[1]
+    
+    await query.answer()
+    if data[2] == 'cancel':
+        obj.is_cancel = obj.executor.is_cancel = True
+        obj.executor.data = None
+        obj.event.set()
+    elif mode == 'merge_rmaudio':
+        if data[2] == 'all':
+            obj.executor.data['audio_remove'] = 'all'
             obj.event.set()
-        case 'subsync':
-            if data[2].isdigit():
-                obj.status = int(data[2])
-            elif data[2] == 'select':
-                obj.executor.data['final'][obj.status]['ref'] = obj.executor.data['list'][int(data[3])]
-                obj.status = ''
-            elif data[2] == 'continue':
-                obj.event.set()
-                return
-            await gather(query.answer(), obj.subsync_select())
-        case 'compress':
-            await query.answer()
-            obj.executor.data['audio'] = int(data[2])
+        elif data[2] == 'continue':
             obj.event.set()
-        case 'convert':
-            await query.answer()
-            obj.executor.data = data[2]
-            obj.event.set()
-        case 'rmstream':
-            ddict: dict = obj.executor.data
-            match data[2]:
-                case 'reset':
-                    if sdata := ddict['sdata']:
-                        await query.answer()
-                        for mapindex in sdata:
-                            info = ddict['stream'][mapindex]['info']
-                            ddict['stream'][mapindex]['info'] = info.replace('🔥 ', '')
-                        sdata.clear()
-                        await obj.update_message(*obj.streams_select())
-                    else:
-                        await query.answer('No any selected stream to reset!', True)
-                case 'continue':
-                    if ddict['sdata']:
-                        await query.answer()
-                        obj.event.set()
-                    else:
-                        await query.answer('Please select at least one stream!', True)
-                case 'audio' | 'subtitle' as value:
-                    await query.answer()
-                    obj.executor.data['key'] = value
-                    obj.event.set()
-                case 'reverse':
-                    if ddict['sdata']:
-                        await query.answer()
-                        new_sdata = [x for x in ddict['stream'] if x not in ddict['sdata'] and x != 0]
-                        for key, value in ddict['stream'].items():
-                            info = value['info']
-                            ddict['stream'][key]['info'] = f'🔥 {info}' if key in new_sdata else info.replace('🔥 ', '')
-                        ddict['sdata'] = new_sdata
-                        await obj.update_message(*obj.streams_select())
-                    else:
-                        await query.answer('No any selected stream to revers!', True)
-                case value:
-                    await query.answer()
-                    mapindex = int(value)
-                    info = ddict['stream'][mapindex]['info']
-                    if mapindex in ddict['sdata']:
-                        ddict['sdata'].remove(mapindex)
-                        ddict['stream'][mapindex]['info'] = info.replace('🔥 ', '')
-                    else:
-                        ddict['sdata'].append(mapindex)
-                        ddict['stream'][mapindex]['info'] = f'🔥 {info}'
-                    await obj.update_message(*obj.streams_select())
-        case 'extract':
-            value = data[2]
-            await query.answer()
-            if value in ('extension', 'alt'):
-                ext_dict = {'ass': [1, 'srt'],
-                            'srt': [1, 'ass'],
-                            'aac': [0, 'ac3'],
-                            'ac3': [0, 'eac3'],
-                            'eac3': [0, 'm4a'],
-                            'm4a': [0, 'mka'],
-                            'mka': [0, 'wav'],
-                            'wav': [0, 'aac'],
-                            'mp4': [2, 'mkv'],
-                            'mkv': [2, 'mp4']}
-                if data[3] in ext_dict:
-                    index, ext = ext_dict[data[3]]
-                    obj.extension[index] = ext
-                if value == 'alt':
-                    obj.executor.data['alt_mode'] = not literal_eval(data[3])
-                await obj.update_message(*obj.streams_select())
+        else:
+            mapindex = int(data[2])
+            if mapindex in obj.executor.data['audio_remove']:
+                obj.executor.data['audio_remove'].remove(mapindex)
             else:
-                obj.executor.data.update({'key': int(value) if value.isdigit() else data[2:],
-                                          'extension': obj.extension})
+                obj.executor.data['audio_remove'].append(mapindex)
+            await obj.merge_rmaudio_select(obj.executor.data['streams'])
+    elif mode == 'merge_preremove_audio':
+        files = list(obj.executor.data['streams_per_file'].keys())
+        current_file = obj.status or files[0] if files else None
+        
+        if data[2] == 'done':
+            obj.event.set()
+        elif data[2] == 'prev_file':
+            obj.executor.data['file_page'] = max(0, obj.executor.data.get('file_page', 0) - 1)
+            obj.status = files[obj.executor.data['file_page']]
+            await obj.merge_preremove_audio_select(obj.executor.data['streams_per_file'])
+        elif data[2] == 'next_file':
+            obj.executor.data['file_page'] = min(len(files) - 1, obj.executor.data.get('file_page', 0) + 1)
+            obj.status = files[obj.executor.data['file_page']]
+            await obj.merge_preremove_audio_select(obj.executor.data['streams_per_file'])
+        elif data[2] == 'prev_track':
+            obj.executor.data['track_page'] = max(0, obj.executor.data.get('track_page', 0) - 1)
+            await obj.merge_preremove_audio_select(obj.executor.data['streams_per_file'])
+        elif data[2] == 'next_track':
+            total_pages = (len([s for s in obj.executor.data['streams_per_file'][current_file] 
+                               if s['codec_type'] == 'audio']) + 4) // 5
+            obj.executor.data['track_page'] = min(total_pages - 1, obj.executor.data.get('track_page', 0) + 1)
+            await obj.merge_preremove_audio_select(obj.executor.data['streams_per_file'])
+        else:
+            file, action = data[2], data[3]
+            if file not in obj.executor.data['audio_selections']:
+                obj.executor.data['audio_selections'][file] = []
+            selections = obj.executor.data['audio_selections'][file]
+            if action == 'all':
+                obj.executor.data['audio_selections'][file] = 'all'
+            elif action.isdigit():
+                index = int(action)
+                if index in selections:
+                    selections.remove(index)
+                else:
+                    selections.append(index)
+            obj.status = file
+            await obj.merge_preremove_audio_select(obj.executor.data['streams_per_file'])
+    elif mode == 'subsync':
+        if data[2].isdigit():
+            obj.status = int(data[2])
+        elif data[2] == 'select':
+            obj.executor.data['final'][obj.status]['ref'] = obj.executor.data['list'][int(data[3])]
+            obj.status = ''
+        elif data[2] == 'continue':
+            obj.event.set()
+            return
+        await gather(query.answer(), obj.subsync_select())
+    elif mode == 'compress':
+        obj.executor.data['audio'] = int(data[2])
+        obj.event.set()
+    elif mode == 'convert':
+        obj.executor.data = data[2]
+        obj.event.set()
+    elif mode == 'rmstream':
+        ddict = obj.executor.data
+        match data[2]:
+            case 'reset':
+                if sdata := ddict['sdata']:
+                    for mapindex in sdata:
+                        info = ddict['stream'][mapindex]['info']
+                        ddict['stream'][mapindex]['info'] = info.replace('🔥 ', '')
+                    sdata.clear()
+                    await obj.update_message(*obj.streams_select())
+                else:
+                    await query.answer('No any selected stream to reset!', True)
+            case 'continue':
+                if ddict['sdata']:
+                    obj.event.set()
+                else:
+                    await query.answer('Please select at least one stream!', True)
+            case 'audio' | 'subtitle' as value:
+                obj.executor.data['key'] = value
                 obj.event.set()
+            case 'reverse':
+                if ddict['sdata']:
+                    new_sdata = [x for x in ddict['stream'] if x not in ddict['sdata'] and x != 0]
+                    for key, value in ddict['stream'].items():
+                        info = value['info']
+                        ddict['stream'][key]['info'] = f'🔥 {info}' if key in new_sdata else info.replace('🔥 ', '')
+                    ddict['sdata'] = new_sdata
+                    await obj.update_message(*obj.streams_select())
+                else:
+                    await query.answer('No any selected stream to revers!', True)
+            case value:
+                mapindex = int(value)
+                info = ddict['stream'][mapindex]['info']
+                if mapindex in ddict['sdata']:
+                    ddict['sdata'].remove(mapindex)
+                    ddict['stream'][mapindex]['info'] = info.replace('🔥 ', '')
+                else:
+                    ddict['sdata'].append(mapindex)
+                    ddict['stream'][mapindex]['info'] = f'🔥 {info}'
+                await obj.update_message(*obj.streams_select())
+    elif mode == 'extract':
+        value = data[2]
+        if value in ('extension', 'alt'):
+            ext_dict = {'ass': [1, 'srt'], 'srt': [1, 'ass'], 'aac': [0, 'ac3'], 'ac3': [0, 'eac3'],
+                        'eac3': [0, 'm4a'], 'm4a': [0, 'mka'], 'mka': [0, 'wav'], 'wav': [0, 'aac'],
+                        'mp4': [2, 'mkv'], 'mkv': [2, 'mp4']}
+            if data[3] in ext_dict:
+                index, ext = ext_dict[data[3]]
+                obj.extension[index] = ext
+            if value == 'alt':
+                obj.executor.data['alt_mode'] = not literal_eval(data[3])
+            await obj.update_message(*obj.streams_select())
+        else:
+            obj.executor.data.update({'key': int(value) if value.isdigit() else data[2:],
+                                      'extension': obj.extension})
+            obj.event.set()
