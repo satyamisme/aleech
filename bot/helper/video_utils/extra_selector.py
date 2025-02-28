@@ -22,7 +22,7 @@ class ExtraSelect:
         self.executor = executor
         self.event = Event()
         self.is_cancel = False
-        self.extension = [None, None, 'mkv']
+        self.extension: list[str] = [None, None, 'mkv']
         self.status = ''
 
     @new_thread
@@ -237,7 +237,7 @@ class ExtraSelect:
                 sub_files.append(ospath.join(self.executor.path, key['file']))
                 ref_files.append(ospath.join(self.executor.path, key['ref']))
         else:
-            file = self.executor.data['list'][self.status]
+            file: dict = self.executor.data['list'][self.status]
             text = (f'Current: <b>{file}</b>\n'
                     f'References: <b>{ref}</b>\n' if (ref := self.executor.data['final'].get(self.status, {}).get('ref')) else ''
                     '\nSelect Available References Below!\n')
@@ -370,7 +370,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
         obj.executor.data = data[2]
         obj.event.set()
     elif mode == 'rmstream':
-        ddict = obj.executor.data
+        ddict: dict = obj.executor.data
         match data[2]:
             case 'reset':
                 if sdata := ddict['sdata']:
@@ -398,7 +398,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                     ddict['sdata'] = new_sdata
                     await obj.update_message(*obj.streams_select())
                 else:
-                    await query.answer('No any selected stream to revers!', True)
+                    await query.answer('No any selected stream to reverse!', True)
             case value:
                 mapindex = int(value)
                 info = ddict['stream'][mapindex]['info']
@@ -412,9 +412,16 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
     elif mode == 'extract':
         value = data[2]
         if value in ('extension', 'alt'):
-            ext_dict = {'ass': [1, 'srt'], 'srt': [1, 'ass'], 'aac': [0, 'ac3'], 'ac3': [0, 'eac3'],
-                        'eac3': [0, 'm4a'], 'm4a': [0, 'mka'], 'mka': [0, 'wav'], 'wav': [0, 'aac'],
-                        'mp4': [2, 'mkv'], 'mkv': [2, 'mp4']}
+            ext_dict = {'ass': [1, 'srt'],
+                        'srt': [1, 'ass'],
+                        'aac': [0, 'ac3'],
+                        'ac3': [0, 'eac3'],
+                        'eac3': [0, 'm4a'],
+                        'm4a': [0, 'mka'],
+                        'mka': [0, 'wav'],
+                        'wav': [0, 'aac'],
+                        'mp4': [2, 'mkv'],
+                        'mkv': [2, 'mp4']}
             if data[3] in ext_dict:
                 index, ext = ext_dict[data[3]]
                 obj.extension[index] = ext
@@ -423,5 +430,5 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             await obj.update_message(*obj.streams_select())
         else:
             obj.executor.data.update({'key': int(value) if value.isdigit() else data[2:],
-                                      'extension': obj.extension})
+                                    'extension': obj.extension})
             obj.event.set()
