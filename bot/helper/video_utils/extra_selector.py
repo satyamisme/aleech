@@ -345,8 +345,9 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                         obj.executor.data['streams'][stream_key]['info'] = f"🔵 {obj.executor.data['streams'][stream_key]['info']}"
                     obj.executor.data['streams_to_remove'] = streams_to_remove
                     await obj.merge_rmaudio_select(None)
-                except ValueError:
-                    LOGGER.error(f"Invalid stream key: {data[2]}")
+                except (ValueError, KeyError) as e:
+                    LOGGER.error(f"Invalid stream key or data error: {e}")
+                    await obj.update_message(f"Error selecting stream {data[2]}. Please try again.", buttons.build_menu(2))
         elif mode == 'rmstream':
             if data[2] == 'all':
                 if 'audio' in data[3].lower():
@@ -375,5 +376,6 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                         obj.executor.data['sdata'].append(stream_index)
                         obj.executor.data['streams'][stream_index]['info'] = f"🔵 {obj.executor.data['streams'][stream_index]['info']}"
                     await obj.rmstream_select(obj.executor.data['streams'])
-                except ValueError:
-                    LOGGER.error(f"Invalid stream index: {data[2]}")
+                except (ValueError, KeyError) as e:
+                    LOGGER.error(f"Invalid stream index or data error: {e}")
+                    await obj.update_message(f"Error selecting stream {data[2]}. Please try again.", buttons.build_menu(2))
