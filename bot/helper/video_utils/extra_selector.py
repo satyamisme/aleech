@@ -7,6 +7,7 @@ from pyrogram.handlers import CallbackQueryHandler
 from pyrogram.types import CallbackQuery
 from time import time
 import os
+import asyncio
 
 from bot import LOGGER, VID_MODE
 from bot.helper.ext_utils.bot_utils import new_thread
@@ -36,19 +37,18 @@ class ExtraSelect:
         handler = self._listener.client.add_handler(CallbackQueryHandler(pfunc, filters=regex('^extra') & user(self._listener.user_id)), group=-1)
         try:
             await wait_for(self.event.wait(), timeout=180)
-            LOGGER.info(f"ExtraSelect event completed for {self.executor.mode}")
+            LOGGER.info(f"ExtraSelect event completed successfully for {self.executor.mode}")
         except TimeoutError:
-            LOGGER.warning(f"ExtraSelect timeout for {self.executor.mode}")
-            self.event.set()
+            LOGGER.warning(f"ExtraSelect timed out for {self.executor.mode}")
             self.is_cancel = True
             await self._cleanup()
         except Exception as e:
             LOGGER.error(f"Event handler error in ExtraSelect: {str(e)}", exc_info=True)
             self.is_cancel = True
             await self._cleanup()
-            self.event.set()
         finally:
             self._listener.client.remove_handler(*handler)
+            self.event.set()  # Ensure event is set even on error
 
     async def _cleanup(self):
         """Clean up any temporary data or state for this task."""
@@ -66,6 +66,8 @@ class ExtraSelect:
             else:
                 LOGGER.info(f"Updating ExtraSelect message for {self.executor.mode}")
                 await editMessage(text, self._reply, buttons)
+            if not self._reply:
+                LOGGER.error(f"Failed to send/update message for {self.executor.mode}")
         except Exception as e:
             LOGGER.error(f"Failed to update message: {e}")
 
@@ -78,6 +80,9 @@ class ExtraSelect:
 
     async def streams_select(self, streams, mode=None):
         async with data_lock:
+            if not streams:
+                LOGGER.warning(f"No streams provided for {mode}")
+                return "No streams available.", ButtonMaker().build_menu(1)
             buttons = ButtonMaker()
             if not self.executor.data:
                 LOGGER.info(f"Initializing stream data for {mode}")
@@ -106,7 +111,7 @@ class ExtraSelect:
             mode, ddict = self.executor.mode, self.executor.data
             streams_dict = ddict['streams']
             self.stream_page.setdefault(mode, 0)
-            streams_per_page = 5  # Increased visibility could adjust this if needed
+            streams_per_page = 5
             total_streams = len(streams_dict)
             total_pages = max(1, (total_streams + streams_per_page - 1) // streams_per_page)
             page = min(self.stream_page[mode], total_pages - 1)
@@ -114,7 +119,6 @@ class ExtraSelect:
             end_idx = min(start_idx + streams_per_page, total_streams)
             displayed_streams = list(streams_dict.items())[start_idx:end_idx]
 
-            # Improved UI formatting
             text = (f'<b>{VID_MODE[mode].upper()} ~ {self._listener.tag}</b>\n'
                     f'<code>{self.executor.name}</code>\n'
                     f'Size: <b>{get_readable_file_size(self.executor.size)}</b>\n')
@@ -155,7 +159,7 @@ class ExtraSelect:
                     buttons.button_data('Next', f'extra {mode} next', 'footer')
 
             text += f'\n<i>Time Left: {get_readable_time(180 - (time() - self._time))}</i>'
-            LOGGER.info(f"Prepared streams_select full text for {mode}: {text}")
+            LOGGER.info(f"Prepared streams_select text for {mode}: {text}")
             return text, buttons.build_menu(2)
 
     async def merge_rmaudio_select(self, streams):
@@ -263,6 +267,9 @@ class ExtraSelect:
         LOGGER.info(f"Starting get_buttons for mode {self.executor.mode} with args: {args}")
         future = self._event_handler()
         try:
+            if not args or not args[0]:
+                LOGGER.error(f"No valid streams passed to get_buttons for {self.executor.mode}")
+                return
             if self.executor.mode == 'merge_rmaudio':
                 await self.merge_rmaudio_select(*args)
             elif self.executor.mode == 'merge_preremove_audio':
@@ -278,7 +285,7 @@ class ExtraSelect:
             elif self.executor.mode == 'extract':
                 await self.extract_select(*args)
             await wrap_future(future)
-            LOGGER.info(f"get_buttons finished awaiting event for {self.executor.mode}")
+            LOGGER.info(f"get_buttons finished awaiting event for {self.executor.mode}, data: {self.executor.data}")
         except Exception as e:
             LOGGER.error(f"Error in get_buttons: {e}", exc_info=True)
             await self._cleanup()
@@ -289,7 +296,7 @@ class ExtraSelect:
             if self.is_cancel:
                 self._listener.suproc = 'cancelled'
                 await self._listener.onUploadError(f'{VID_MODE[self.executor.mode]} stopped by user!')
-            LOGGER.info(f"get_buttons completed for {self.executor.mode}, is_cancel: {self.is_cancel}")
+            LOGGER.info(f"get_buttons completed for {self.executor.mode}, is_cancel: {self.is_cancel}, data: {self.executor.data}")
 
 async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
     data = query.data.split()
@@ -325,8 +332,9 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             obj.executor.data['sdata'] = []
             await obj.update_message(*(await obj.streams_select(None, mode)))
         elif data[2] == 'continue':
-            LOGGER.info(f"Continue triggered for {mode}, setting event")
+            LOGGER.info(f"Continue triggered for {mode}, setting event with data: {obj.executor.data}")
             obj.event.set()
+            await asyncio.sleep(1)  # Ensure event propagates
             LOGGER.info(f"Event set for {mode}, selections: {obj.executor.data.get('streams_to_remove', [])}")
         elif mode == 'merge_rmaudio':
             if data[2] == 'all':

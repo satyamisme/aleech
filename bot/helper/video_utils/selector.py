@@ -11,7 +11,7 @@ from pyrogram.types import Message, CallbackQuery
 from re import match as re_match
 from time import time
 
-from bot import config_dict, VID_MODE, LOGGER  # Added LOGGER import
+from bot import config_dict, VID_MODE, LOGGER
 from bot.helper.ext_utils.bot_utils import new_task, new_thread, sync_to_async
 from bot.helper.ext_utils.files_utils import clean_target
 from bot.helper.ext_utils.links_utils import is_media
@@ -37,16 +37,19 @@ class SelectMode:
 
     @new_thread
     async def _event_handler(self):
+        LOGGER.info(f"Starting SelectMode event handler for user {self.listener.user_id}")
         pfunc = partial(cb_vidtools, obj=self)
-        handler = self.listener.client.add_handler(CallbackQueryHandler(pfunc, filters=regex('^vidtool') & user(self.listener.user_id)), group=-1)
+        handler = self.listener.client.add_handler(CallbackQueryHandler(pfunc, filters=regex('^vidtool') & user(self._listener.user_id)), group=-1)
         try:
             await wait_for(self.event.wait(), timeout=180)
+            LOGGER.info(f"SelectMode event completed for user {self.listener.user_id}")
         except TimeoutError:
             self.mode = 'Task has been cancelled, time out!'
             self.is_cancelled = True
             self.event.set()
+            LOGGER.warning(f"SelectMode timed out for user {self.listener.user_id}")
         except Exception as e:
-            LOGGER.error(f"Event handler error in SelectMode: {str(e)}", exc_info=True)  # Improved logging
+            LOGGER.error(f"Event handler error in SelectMode: {str(e)}", exc_info=True)
             self.is_cancelled = True
             self.event.set()
         finally:
@@ -54,14 +57,17 @@ class SelectMode:
 
     @new_thread
     async def message_event_handler(self, mode=''):
+        LOGGER.info(f"Starting message event handler for mode {mode}")
         pfunc = partial(message_handler, obj=self, is_sub=mode == 'subfile')
-        handler = self.listener.client.add_handler(MessageHandler(pfunc, user(self.listener.user_id)), group=1)
+        handler = self.listener.client.add_handler(MessageHandler(pfunc, user(self._listener.user_id)), group=1)
         try:
             await wait_for(self.message_event.wait(), timeout=60)
+            LOGGER.info(f"Message event completed for mode {mode}")
         except TimeoutError:
             self.message_event.set()
+            LOGGER.warning(f"Message event timed out for mode {mode}")
         except Exception as e:
-            LOGGER.error(f"Message event handler error: {str(e)}", exc_info=True)
+            LOGGER.error(f"Message event handler error: {e}", exc_info=True)
             self.message_event.set()
         finally:
             self.listener.client.remove_handler(*handler)
@@ -70,9 +76,11 @@ class SelectMode:
     async def _send_message(self, text: str, buttons):
         try:
             if not self._reply:
-                self._reply = await sendMessage(text, self.listener.message, buttons)
+                self._reply = await sendMessage(text, self._listener.message, buttons)
+                LOGGER.info(f"Sent initial message for mode selection")
             else:
                 await editMessage(text, self._reply, buttons)
+                LOGGER.info(f"Updated message for mode selection")
         except Exception as e:
             LOGGER.error(f"Failed to send message: {e}")
 
@@ -205,41 +213,50 @@ class SelectMode:
         await self._send_message(self._captions(mode), buttons.build_menu(bnum, 3))
 
     async def get_buttons(self):
+        LOGGER.info(f"Starting get_buttons for user {self.listener.user_id}")
         future = self._event_handler()
         try:
             await gather(self.list_buttons(), wrap_future(future))
             if self.is_cancelled:
                 await editMessage(self.mode, self._reply)
+                LOGGER.info(f"Task cancelled for user {self.listener.user_id}")
                 return None
             await deleteMessage(self._reply)
+            LOGGER.info(f"Mode selected: {self.mode}, name: {self.newname}, extra_data: {self.extra_data}")
             return [self.mode, self.newname, self.extra_data]
         except Exception as e:
-            LOGGER.error(f"Error in get_buttons: {str(e)}", exc_info=True)
+            LOGGER.error(f"Error in get_buttons: {e}", exc_info=True)
             return None
 
 async def message_handler(_, message: Message, obj: SelectMode, is_sub=False):
     data = None
     if not message.text and not is_media(message):
         await sendMessage('Invalid input! Send text or media as required.', message)
+        LOGGER.warning(f"Invalid input received from user {obj.listener.user_id}")
         return
     if obj.is_rename and message.text:
         obj.newname = message.text.strip().replace('/', '')
         obj.is_rename = False
+        LOGGER.info(f"Name set to {obj.newname} by user {obj.listener.user_id}")
     elif obj.mode == 'watermark' and (media := is_media(message)):
         if is_sub:
             if message.document and not media.file_name.lower().endswith(('.ass', '.srt')):
                 await sendMessage('Only .ass or .srt allowed!', message)
+                LOGGER.warning(f"Invalid subtitle file from user {obj.listener.user_id}")
                 return
             obj.extra_data['subfile'] = await message.download(ospath.join('watermark', media.file_id))
+            LOGGER.info(f"Subtitle file downloaded: {obj.extra_data['subfile']}")
         else:
             if message.document and 'image' not in getattr(media, 'mime_type', 'None'):
                 await sendMessage('Only image document allowed!', message)
+                LOGGER.warning(f"Invalid watermark image from user {obj.listener.user_id}")
                 return
             fpath = await message.download(ospath.join('watermark', media.file_id))
             try:
                 await sync_to_async(Image.open(fpath).convert('RGBA').save, ospath.join('watermark', f'{obj.listener.mid}.png'), 'PNG')
                 await clean_target(fpath)
                 data = 'wmsize'
+                LOGGER.info(f"Watermark image processed for user {obj.listener.user_id}")
             except Exception as e:
                 LOGGER.error(f"Error processing watermark image: {e}")
                 await clean_target(fpath)
@@ -247,8 +264,10 @@ async def message_handler(_, message: Message, obj: SelectMode, is_sub=False):
     elif obj.mode == 'trim' and message.text:
         if match := re_match(r'(\d{2}:\d{2}:\d{2})\s(\d{2}:\d{2}:\d{2})', message.text.strip()):
             obj.extra_data.update({'start_time': match.group(1), 'end_time': match.group(2)})
+            LOGGER.info(f"Trim duration set: {obj.extra_data}")
         else:
             await sendMessage('Invalid trim duration format! Use hh:mm:ss hh:mm:ss', message)
+            LOGGER.warning(f"Invalid trim duration format from user {obj.listener.user_id}")
             return
     obj.message_event.set()
     await gather(obj.list_buttons(data), deleteMessage(message))
@@ -258,37 +277,47 @@ async def cb_vidtools(_, query: CallbackQuery, obj: SelectMode):
     data = query.data.split()
     if len(data) < 2:
         await query.answer("Invalid callback data!", show_alert=True)
+        LOGGER.warning(f"Invalid callback data from user {obj.listener.user_id}: {query.data}")
         return
     if data[1] in config_dict['DISABLE_VIDTOOLS']:
         await query.answer(f'{VID_MODE[data[1]]} has been disabled!', show_alert=True)
+        LOGGER.info(f"Disabled mode {data[1]} attempted by user {obj.listener.user_id}")
         return
     await query.answer()
-    if data[1] == obj.mode and len(data) == 2:  # Avoid redundant clicks unless sub-option provided
+    if data[1] == obj.mode and len(data) == 2:
+        LOGGER.info(f"Redundant mode selection {data[1]} by user {obj.listener.user_id}")
         return
+    LOGGER.info(f"Callback received: {query.data}")
     match data[1]:
         case 'done':
             obj.event.set()
+            LOGGER.info(f"Done triggered by user {obj.listener.user_id}")
         case 'back':
             if obj.message_event.is_set():
                 obj.message_event.clear()
             await obj.list_buttons()
+            LOGGER.info(f"Back navigation by user {obj.listener.user_id}")
         case 'cancel':
             obj.mode = 'Task has been cancelled!'
             obj.is_cancelled = True
             obj.event.set()
+            LOGGER.info(f"Cancel triggered by user {obj.listener.user_id}")
         case 'quality' | 'popupwm' as value:
             if len(data) == 3:
                 obj.extra_data[value] = data[2] if value == 'quality' else int(data[2])
+                LOGGER.info(f"{value} set to {data[2]} by user {obj.listener.user_id}")
             await obj.list_buttons(value)
         case 'hardsub':
             hmode = not bool(obj.extra_data.get('hardsub'))
             if not hmode and obj.mode == 'vid_sub':
                 obj.extra_data.clear()
             obj.extra_data['hardsub'] = hmode
+            LOGGER.info(f"Hardsub toggled to {hmode} by user {obj.listener.user_id}")
             await obj.list_buttons()
         case 'subfile':
             future = obj.message_event_handler('subfile')
             await gather(obj.list_buttons('subfile'), wrap_future(future))
+            LOGGER.info(f"Subfile selection started by user {obj.listener.user_id}")
         case 'fontstyle':
             mode = 'fontstyle'
             if len(data) > 2:
@@ -299,6 +328,7 @@ async def cb_vidtools(_, query: CallbackQuery, obj: SelectMode):
                         return
                     try:
                         obj.extra_data[mode] = not literal_eval(data[3]) if is_bold else data[3]
+                        LOGGER.info(f"Fontstyle {mode} set to {obj.extra_data[mode]} by user {obj.listener.user_id}")
                     except ValueError:
                         LOGGER.error(f"Invalid boldstyle value: {data[3]}")
                         return
@@ -307,12 +337,15 @@ async def cb_vidtools(_, query: CallbackQuery, obj: SelectMode):
             await obj.list_buttons(mode)
         case 'sync_manual' | 'sync_auto' as value:
             obj.extra_data['type'] = value
+            LOGGER.info(f"Subsync type set to {value} by user {obj.listener.user_id}")
             await obj.list_buttons()
         case 'wmsize' | 'wmposition' as value:
             if len(data) < 3:
                 await query.answer(f"Missing value for {value}!", show_alert=True)
+                LOGGER.warning(f"Missing value for {value} from user {obj.listener.user_id}")
                 return
             obj.extra_data[value] = data[2]
+            LOGGER.info(f"{value} set to {data[2]} by user {obj.listener.user_id}")
             await obj.list_buttons('wmposition' if value == 'wmsize' else None)
         case value:
             if value == 'rename':
@@ -320,6 +353,7 @@ async def cb_vidtools(_, query: CallbackQuery, obj: SelectMode):
             else:
                 obj.mode = value
                 obj.extra_data.clear()
+                LOGGER.info(f"Mode set to {value} by user {obj.listener.user_id}")
             if value in ['watermark', 'rename', 'trim']:
                 future = obj.message_event_handler(value)
                 await gather(obj.list_buttons(value), wrap_future(future))
