@@ -165,10 +165,10 @@ class ExtraSelect:
     async def merge_rmaudio_select(self, streams):
         if isinstance(streams, tuple) and len(streams) == 2:  # Handle tuple from get_metavideo
             streams, _ = streams  # Unpack the tuple, use only streams list
-        await self.streams_select(streams, 'merge_rmaudio')
+        self.streams_select(streams, 'merge_rmaudio')  # Remove await, as streams_select is not async
 
     async def merge_preremove_audio_select(self, streams_per_file: dict):
-        await self.streams_select(streams_per_file, 'merge_preremove_audio')
+        self.streams_select(streams_per_file, 'merge_preremove_audio')  # Remove await
 
     async def compress_select(self, streams: dict):
         if isinstance(streams, tuple) and len(streams) == 2:  # Handle tuple from get_metavideo
@@ -192,7 +192,7 @@ class ExtraSelect:
     async def rmstream_select(self, streams):
         if isinstance(streams, tuple) and len(streams) == 2:  # Handle tuple from get_metavideo
             streams, _ = streams  # Unpack the tuple, use only streams list
-        await self.streams_select(streams, 'rmstream')
+        self.streams_select(streams, 'rmstream')  # Remove await
 
     async def convert_select(self, streams: dict):
         if isinstance(streams, tuple) and len(streams) == 2:  # Handle tuple from get_metavideo
@@ -274,7 +274,7 @@ class ExtraSelect:
         if not ext[1]:
             ext[1] = 'srt'
         self.extension = ext
-        await self.streams_select(streams, 'extract')
+        self.streams_select(streams, 'extract')  # Remove await
 
     async def get_buttons(self, *args):
         future = self._event_handler()
@@ -312,13 +312,13 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
         obj.stream_page[mode] = max(0, obj.stream_page.get(mode, 0) + (1 if data[2] == 'next' else -1))
         if mode in ['merge_rmaudio', 'merge_preremove_audio', 'rmstream', 'extract']:
             if mode == 'merge_rmaudio':
-                await obj.merge_rmaudio_select(None)
+                obj.merge_rmaudio_select(None)  # Remove await
             elif mode == 'merge_preremove_audio':
-                await obj.merge_preremove_audio_select(obj.executor.data['streams_per_file'])
+                obj.merge_preremove_audio_select(obj.executor.data['streams_per_file'])  # Remove await
             elif mode == 'rmstream':
-                await obj.rmstream_select(obj.executor.data['streams'])
+                obj.rmstream_select(obj.executor.data['streams'])  # Remove await
             elif mode == 'extract':
-                await obj.extract_select(obj.executor.data['streams'])
+                obj.extract_select(obj.executor.data['streams'])  # Remove await
     elif mode == 'merge_rmaudio':
         if data[2] == 'all':
             obj.executor.data['streams_to_remove'] = list(obj.executor.data['streams'].keys())
@@ -327,11 +327,11 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             obj.event.set()
         elif data[2] == 'reset':
             obj.executor.data['streams_to_remove'] = []
-            await obj.merge_rmaudio_select(None)
+            obj.merge_rmaudio_select(None)  # Remove await
         elif data[2] == 'reverse':
             all_streams = list(obj.executor.data['streams'].keys())
             obj.executor.data['streams_to_remove'] = [s for s in all_streams if s not in obj.executor.data['streams_to_remove']]
-            await obj.merge_rmaudio_select(None)
+            obj.merge_rmaudio_select(None)  # Remove await
         else:
             stream_key = int(data[2])
             streams_to_remove = obj.executor.data.get('streams_to_remove', [])
@@ -341,7 +341,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                 streams_to_remove.append(stream_key)
             obj.executor.data['streams_to_remove'] = streams_to_remove
             LOGGER.info(f"merge_rmaudio: Updated streams_to_remove to {streams_to_remove}")
-            await obj.merge_rmaudio_select(None)
+            obj.merge_rmaudio_select(None)  # Remove await
     elif mode == 'merge_preremove_audio':
         files = list(obj.executor.data['streams_per_file'].keys())
         current_file = obj.status or files[0] if files else None
@@ -373,7 +373,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                     selections.append(index)
             obj.executor.data['audio_selections'][file] = selections
             obj.status = file
-            await obj.merge_preremove_audio_select(obj.executor.data['streams_per_file'])
+            obj.merge_preremove_audio_select(obj.executor.data['streams_per_file'])  # Remove await
     elif mode == 'subsync':
         if data[2].isdigit():
             obj.status = int(data[2])
@@ -404,13 +404,13 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             for index in obj.executor.data.get('sdata', []):
                 obj.executor.data['streams'][index]['info'] = obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
             obj.executor.data['sdata'] = []
-            await obj.rmstream_select(obj.executor.data['streams'])
+            obj.rmstream_select(obj.executor.data['streams'])  # Remove await
         elif data[2] == 'reverse':
             all_streams = [s['index'] for s in obj.executor.data['streams'].values()]
             obj.executor.data['sdata'] = [s for s in all_streams if s not in obj.executor.data.get('sdata', [])]
             for index in all_streams:
                 obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info']}" if index in obj.executor.data['sdata'] else obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
-            await obj.rmstream_select(obj.executor.data['streams'])
+            obj.rmstream_select(obj.executor.data['streams'])  # Remove await
         else:
             stream_index = int(data[2])
             if stream_index in obj.executor.data.get('sdata', []):
@@ -419,7 +419,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             else:
                 obj.executor.data['sdata'].append(stream_index)
                 obj.executor.data['streams'][stream_index]['info'] = f"🔵 {obj.executor.data['streams'][stream_index]['info']}"
-            await obj.rmstream_select(obj.executor.data['streams'])
+            obj.rmstream_select(obj.executor.data['streams'])  # Remove await
     elif mode == 'extract':
         value = data[2]
         if value in ('extension', 'alt'):
@@ -438,7 +438,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                 obj.extension[index] = ext
             if value == 'alt':
                 obj.executor.data['alt_mode'] = not literal_eval(data[3])
-            await obj.extract_select(obj.executor.data['streams'])
+            obj.extract_select(obj.executor.data['streams'])  # Remove await
         else:
             obj.executor.data.update({'key': int(value) if value.isdigit() else data[2:],
                                      'extension': obj.extension})
