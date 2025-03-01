@@ -132,6 +132,7 @@ class VidEcxecutor(FFProgress):
                 elif self.path.lower().endswith(('.zip', '.rar')):
                     extract_dir = await self._extract_zip(self.path)
                     if extract_dir:
+                        self.path = extract_dir  # Update self.path to extracted directory
                         for dirpath, _, files in await sync_to_async(walk, extract_dir):
                             for file in natsorted(files):
                                 if (await get_document_type(ospath.join(dirpath, file)))[0]:
@@ -302,7 +303,7 @@ class VidEcxecutor(FFProgress):
         async with file_lock:
             self.outfile = ospath.join(base_dir, f"temp_merge_{self._gid}.mkv")
             self._files = file_list
-            input_file = ospath.join(self.path, f'input_{self._gid}.txt')
+            input_file = ospath.join(base_dir, f'input_{self._gid}.txt')  # Fix: Use base_dir, not self.path
             try:
                 async with aiopen(input_file, 'w') as f:
                     await f.write('\n'.join([f"file '{f}'" for f in file_list]))
@@ -311,6 +312,10 @@ class VidEcxecutor(FFProgress):
                     LOGGER.error("Failed to merge files due to incompatible formats or FFmpeg error.")
                     await self._cleanup()
                     return self._up_path
+            except Exception as e:
+                LOGGER.error(f"Error writing input file or running merge: {e}")
+                await self._cleanup()
+                return self._up_path
             finally:
                 await clean_target(input_file)
 
@@ -404,7 +409,7 @@ class VidEcxecutor(FFProgress):
         # Merge processed files
         self.outfile = ospath.join(base_dir, self.name)
         self._files = temp_files
-        input_file = ospath.join(self.path, f'input_{self._gid}.txt')
+        input_file = ospath.join(base_dir, f'input_{self._gid}.txt')  # Fix: Use base_dir
         try:
             async with aiopen(input_file, 'w') as f:
                 await f.write('\n'.join([f"file '{f}'" for f in temp_files]))
