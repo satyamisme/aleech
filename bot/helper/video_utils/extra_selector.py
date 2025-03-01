@@ -34,10 +34,14 @@ class ExtraSelect:
         pfunc = partial(cb_extra, obj=self)
         handler = self._listener.client.add_handler(CallbackQueryHandler(pfunc, filters=regex('^extra') & user(self._listener.user_id)), group=-1)
         try:
-            await wait_for(self.event.wait(), timeout=180)
-        except:
+            await wait_for(self.event.wait(), timeout=180)  # Use wait_for for timeout
+        except TimeoutError:
             self.event.set()
             self.is_cancel = True
+        except Exception as e:
+            LOGGER.error(f"Event handler error: {e}")
+            self.is_cancel = True
+            self.event.set()
         finally:
             self._listener.client.remove_handler(*handler)
 
@@ -57,7 +61,7 @@ class ExtraSelect:
         resolution = f" ({stream.get('height', '')}p)" if stream.get('codec_type') == 'video' and stream.get('height', '') else ''
         return f"{codec_type} ~ {codec_name} ({lang}){resolution}"
 
-    async def streams_select(self, streams, mode=None):  # Added 'async' here
+    async def streams_select(self, streams, mode=None):
         async with data_lock:
             buttons = ButtonMaker()
             if not self.executor.data:
@@ -138,7 +142,8 @@ class ExtraSelect:
                     buttons.button_data('All Subs', f'extra {mode} subtitle')
                     buttons.button_data('Continue', f'extra {mode} continue', 'footer')
                 else:
-                    buttons.button_data("Continue", f'extra {mode} continue', 'footer')
+                    continue_label = "Continue (Remove Selected)" if ddict.get('streams_to_remove') else "Continue (Keep All)"
+                    buttons.button_data(continue_label, f'extra {mode} continue', 'footer')
 
             buttons.button_data('Cancel', 'extra cancel', 'footer')
             if total_streams > streams_per_page:
@@ -215,7 +220,7 @@ class ExtraSelect:
                     return self.executor._up_path
                 self.executor.data['final'] = {}
                 self._start_handler()
-                await gather(self._send_status(), self.event.wait(timeout=300))
+                await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))  # Use wait_for
                 if self.is_cancel or not self.executor.data.get('final'):
                     return self.executor._up_path
                 return self.executor._up_path
@@ -292,16 +297,18 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             if mode == 'merge_rmaudio':
                 await obj.merge_rmaudio_select(None)
             elif mode == 'merge_preremove_audio':
-                await obj.merge_preremove_audio_select(obj.executor.data.get('streams_per_file'))
+                await obj.merge_preremove_audio_select(obj.executor.data.get('streams_per_file', {}))
             elif mode == 'rmstream':
-                await obj.rmstream_select(obj.executor.data.get('streams'))
+                await obj.rmstream_select(obj.executor.data.get('streams', []))
             elif mode == 'extract':
-                await obj.extract_select(obj.executor.data.get('streams'))
+                await obj.extract_select(obj.executor.data.get('streams', []))
         elif mode == 'merge_rmaudio':
             if data[2] == 'all':
                 obj.executor.data['streams_to_remove'] = list(obj.executor.data['streams'].keys())
                 obj.event.set()
             elif data[2] == 'continue':
+                if not obj.executor.data.get('streams_to_remove', []):
+                    LOGGER.warning("No streams selected for removal, keeping all streams.")
                 obj.event.set()
             elif data[2] == 'reset':
                 obj.executor.data['streams_to_remove'] = []
@@ -311,14 +318,17 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                 obj.executor.data['streams_to_remove'] = [s for s in all_streams if s not in obj.executor.data['streams_to_remove']]
                 await obj.merge_rmaudio_select(None)
             else:
-                stream_key = int(data[2])
-                streams_to_remove = obj.executor.data.get('streams_to_remove', [])
-                if stream_key in streams_to_remove:
-                    streams_to_remove.remove(stream_key)
-                else:
-                    streams_to_remove.append(stream_key)
-                obj.executor.data['streams_to_remove'] = streams_to_remove
-                await obj.merge_rmaudio_select(None)
+                try:
+                    stream_key = int(data[2])
+                    streams_to_remove = obj.executor.data.get('streams_to_remove', [])
+                    if stream_key in streams_to_remove:
+                        streams_to_remove.remove(stream_key)
+                    else:
+                        streams_to_remove.append(stream_key)
+                    obj.executor.data['streams_to_remove'] = streams_to_remove
+                    await obj.merge_rmaudio_select(None)
+                except ValueError:
+                    LOGGER.error(f"Invalid stream key: {data[2]}")
         elif mode == 'rmstream':
             if data[2] == 'all':
                 if 'audio' in data[3].lower():
@@ -329,6 +339,8 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                     obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info']}"
                 await obj.rmstream_select(obj.executor.data['streams'])
             elif data[2] == 'continue':
+                if not obj.executor.data.get('sdata', []):
+                    LOGGER.warning("No streams selected for removal, keeping all streams.")
                 obj.event.set()
             elif data[2] == 'reset':
                 for index in obj.executor.data.get('sdata', []):
@@ -336,11 +348,14 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                 obj.executor.data['sdata'] = []
                 await obj.rmstream_select(obj.executor.data['streams'])
             else:
-                stream_index = int(data[2])
-                if stream_index in obj.executor.data.get('sdata', []):
-                    obj.executor.data['sdata'].remove(stream_index)
-                    obj.executor.data['streams'][stream_index]['info'] = obj.executor.data['streams'][stream_index]['info'].replace('🔵 ', '')
-                else:
-                    obj.executor.data['sdata'].append(stream_index)
-                    obj.executor.data['streams'][stream_index]['info'] = f"🔵 {obj.executor.data['streams'][stream_index]['info']}"
-                await obj.rmstream_select(obj.executor.data['streams'])
+                try:
+                    stream_index = int(data[2])
+                    if stream_index in obj.executor.data.get('sdata', []):
+                        obj.executor.data['sdata'].remove(stream_index)
+                        obj.executor.data['streams'][stream_index]['info'] = obj.executor.data['streams'][stream_index]['info'].replace('🔵 ', '')
+                    else:
+                        obj.executor.data['sdata'].append(stream_index)
+                        obj.executor.data['streams'][stream_index]['info'] = f"🔵 {obj.executor.data['streams'][stream_index]['info']}"
+                    await obj.rmstream_select(obj.executor.data['streams'])
+                except ValueError:
+                    LOGGER.error(f"Invalid stream index: {data[2]}")

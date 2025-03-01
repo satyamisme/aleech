@@ -3,7 +3,7 @@ from aiofiles import open as aiopen
 from aiofiles.os import path as aiopath, makedirs, listdir, remove
 from aioshutil import move, rmtree
 from ast import literal_eval
-from asyncio import create_subprocess_exec, sleep, gather, Event, Lock
+from asyncio import create_subprocess_exec, sleep, gather, Event, Lock, wait_for
 from asyncio.subprocess import PIPE
 from natsort import natsorted
 from os import path as ospath, walk
@@ -67,8 +67,8 @@ class VidEcxecutor(FFProgress):
                 if update:
                     await sendStatusMessage(self.listener.message)
                 try:
-                    await event.wait(timeout=300)
-                except:
+                    await wait_for(event.wait(), timeout=300)
+                except TimeoutError:
                     LOGGER.error(f"Queue timeout for {self.name}")
                     self.is_cancel = True
                     async with task_dict_lock:
@@ -256,8 +256,9 @@ class VidEcxecutor(FFProgress):
         base_dir = await self._name_base_dir(file_list[0], 'Merge-RemoveAudio', True)
 
         self._start_handler(streams)
-        await gather(self._send_status(), self.event.wait(timeout=300))
-        if self.is_cancel or not self.data:
+        await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
+        if self.is_cancel or not self.data or not self.data.get('streams_to_remove', []):
+            LOGGER.warning("Merge and remove audio cancelled or no streams selected for removal.")
             return self._up_path
 
         async with file_lock:
@@ -269,9 +270,9 @@ class VidEcxecutor(FFProgress):
                     await f.write('\n'.join([f"file '{f}'" for f in file_list]))
                 cmd = [FFMPEG_NAME, '-f', 'concat', '-safe', '0', '-i', input_file]
                 streams_to_remove = self.data.get('streams_to_remove', [])
-                cmd.extend(['-map'] + [f'0:{s["index"]}' for s in self.data['streams'].values() 
-                                     if s['index'] not in streams_to_remove and s['codec_type'] != 'video'] 
-                          if streams_to_remove else ['-map', '0'])
+                kept_streams = [f'0:{s["index"]}' for s in self.data['streams'].values() 
+                               if s['index'] not in streams_to_remove and s['codec_type'] != 'video']
+                cmd.extend(['-map'] + kept_streams if kept_streams else ['-map', '0:v'])
                 cmd.extend(('-c', 'copy', self.outfile, '-y'))
                 if not await self._run_cmd(cmd, 'direct'):
                     return self._up_path
@@ -293,7 +294,7 @@ class VidEcxecutor(FFProgress):
         base_dir = await self._name_base_dir(file_list[0], 'Merge-PreRemoveAudio', True)
 
         self._start_handler(streams_per_file)
-        await gather(self._send_status(), self.event.wait(timeout=300))
+        await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
         if self.is_cancel or not self.data:
             return self._up_path
 
@@ -337,7 +338,7 @@ class VidEcxecutor(FFProgress):
     async def _rm_audio_single(self):
         streams, _ = await get_metavideo(self.path)
         self._start_handler(streams)
-        await gather(self._send_status(), self.event.wait(timeout=300))
+        await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
         if self.is_cancel or not self.data:
             return self._up_path
 
@@ -506,7 +507,7 @@ class VidEcxecutor(FFProgress):
                 if not self.data['list']:
                     return self._up_path
                 self._start_handler()
-                await gather(self._send_status(), self.event.wait(timeout=300))
+                await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
                 if self.is_cancel or not self.data.get('final'):
                     return self._up_path
                 sub_files = [ospath.join(self.path, key['file']) for key in self.data['final'].values()]
@@ -548,7 +549,7 @@ class VidEcxecutor(FFProgress):
                 base_dir, (streams, _), self.size = await gather(self._name_base_dir(main_video, 'Compress', multi),
                                                                  get_metavideo(main_video), get_path_size(main_video))
             self._start_handler(streams)
-            await gather(self._send_status(), self.event.wait(timeout=300))
+            await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
             await self._queue()
             if self.is_cancel or not isinstance(self.data, dict):
                 return self._up_path
@@ -633,7 +634,7 @@ class VidEcxecutor(FFProgress):
                                                              get_metavideo(main_video), get_path_size(main_video))
 
         self._start_handler(streams)
-        await gather(self._send_status(), self.event.wait(timeout=300))
+        await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
         await self._queue()
         if self.is_cancel or not self.data:
             return self._up_path
@@ -708,7 +709,7 @@ class VidEcxecutor(FFProgress):
                 base_dir, (streams, _), self.size = await gather(self._name_base_dir(main_video, 'Convert', multi),
                                                                  get_metavideo(main_video), get_path_size(main_video))
             self._start_handler(streams)
-            await gather(self._send_status(), self.event.wait(timeout=300))
+            await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
             await self._queue()
             if self.is_cancel or not self.data:
                 return self._up_path
@@ -741,7 +742,7 @@ class VidEcxecutor(FFProgress):
                 base_dir, (streams, _), self.size = await gather(self._name_base_dir(main_video, 'Remove', multi),
                                                                  get_metavideo(main_video), get_path_size(main_video))
             self._start_handler(streams)
-            await gather(self._send_status(), self.event.wait(timeout=300))
+            await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
             await self._queue()
             if self.is_cancel or not self.data:
                 return self._up_path

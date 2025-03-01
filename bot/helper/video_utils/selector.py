@@ -41,8 +41,12 @@ class SelectMode:
         handler = self.listener.client.add_handler(CallbackQueryHandler(pfunc, filters=regex('^vidtool') & user(self.listener.user_id)), group=-1)
         try:
             await wait_for(self.event.wait(), timeout=180)
-        except:
+        except TimeoutError:
             self.mode = 'Task has been cancelled, time out!'
+            self.is_cancelled = True
+            self.event.set()
+        except Exception as e:
+            LOGGER.error(f"Event handler error: {e}")
             self.is_cancelled = True
             self.event.set()
         finally:
@@ -54,7 +58,10 @@ class SelectMode:
         handler = self.listener.client.add_handler(MessageHandler(pfunc, user(self.listener.user_id)), group=1)
         try:
             await wait_for(self.message_event.wait(), timeout=60)
-        except:
+        except TimeoutError:
+            self.message_event.set()
+        except Exception as e:
+            LOGGER.error(f"Message event handler error: {e}")
             self.message_event.set()
         finally:
             self.listener.client.remove_handler(*handler)
@@ -161,7 +168,7 @@ class SelectMode:
                     if popupwm:
                         buttons.button_data('Reset', 'vidtool popupwm 0', 'header')
                     for key in range(2, 21, 2):
-                        buttons.button_data(f"{'🔥 ' if popupwm == key else ''}{key}", f'vidtool popupwm {key}')
+                        buttons.button_data(f"{'🔵 ' if popupwm == key else ''}{key}", f'vidtool popupwm {key}')
                     buttons.button_data('<<', 'vidtool back', 'footer')
                     buttons.button_data('Done', 'vidtool done', 'footer')
                 case 'wmsize':
@@ -171,22 +178,22 @@ class SelectMode:
                 case 'fontstyle':
                     bnum = 3
                     _buttons_style(position=None, cb='back')
-                    buttons.button_data(f"{'🔥 ' if self.extra_data.get('boldstyle') else ''}Bold Style", f"vidtool fontstyle boldstyle {self.extra_data.get('boldstyle', False)}", 'header')
+                    buttons.button_data(f"{'🔵 ' if self.extra_data.get('boldstyle') else ''}Bold Style", f"vidtool fontstyle boldstyle {self.extra_data.get('boldstyle', False)}", 'header')
                 case 'fontname':
                     _buttons_style(name=False)
                     for btn in ['Arial', 'Impact', 'Verdana', 'Consolas', 'DejaVu_Sans', 'Comic_Sans_MS', 'Simple_Day_Mistu']:
-                        buttons.button_data(f"{'🔥 ' if btn == self.extra_data.get('fontname') else ''}{btn.replace('_', ' ')}", f'vidtool fontstyle fontname {btn}')
+                        buttons.button_data(f"{'🔵 ' if btn == self.extra_data.get('fontname') else ''}{btn.replace('_', ' ')}", f'vidtool fontstyle fontname {btn}')
                 case 'fontsize':
                     bnum = 5
                     _buttons_style(size=False)
                     for btn in range(11, 31):
-                        buttons.button_data(f"{'🔥 ' if str(btn) == self.extra_data.get('fontsize') else ''}{btn}", f'vidtool fontstyle fontsize {btn}')
+                        buttons.button_data(f"{'🔵 ' if str(btn) == self.extra_data.get('fontsize') else ''}{btn}", f'vidtool fontstyle fontsize {btn}')
                 case 'fontcolour':
                     bnum = 3
                     _buttons_style(colour=False)
                     colours = [('Red', '0000ff'), ('Green', '00ff00'), ('Blue', 'ff0000'), ('Yellow', '00ffff'), ('Orange', '0054ff'), ('Purple', '005aff')]
                     for btn, hexcolour in colours:
-                        buttons.button_data(f"{'🔥 ' if hexcolour == self.extra_data.get('fontcolour') else ''}{btn}", f'vidtool fontstyle fontcolour {hexcolour}')
+                        buttons.button_data(f"{'🔵 ' if hexcolour == self.extra_data.get('fontcolour') else ''}{btn}", f'vidtool fontstyle fontcolour {hexcolour}')
                 case 'wmposition':
                     buttons.button_data('Top Left', 'vidtool wmposition 5:5')
                     buttons.button_data('Top Right', 'vidtool wmposition main_w-overlay_w-5:5')
