@@ -57,7 +57,7 @@ class ExtraSelect:
         resolution = f" ({stream.get('height', '')}p)" if stream.get('codec_type') == 'video' and stream.get('height', '') else ''
         return f"{codec_type} ~ {codec_name} ({lang}){resolution}"
 
-    def streams_select(self, streams, mode=None):
+    async def streams_select(self, streams, mode=None):  # Added 'async' here
         async with data_lock:
             buttons = ButtonMaker()
             if not self.executor.data:
@@ -114,7 +114,6 @@ class ExtraSelect:
             if mode == 'extract':
                 buttons.button_data('🔥 ALT Mode' if ddict.get('alt_mode') else 'ALT Mode', f"extra {mode} alt {ddict.get('alt_mode', False)}", 'footer')
                 audext, subext, vidext = self.extension
-                # Fixed syntax error here by properly closing the f-string and parentheses
                 text += (f"\n<b>┌ </b>Video Format: <b>{vidext.upper()}</b>\n"
                          f"<b>├ </b>Audio Format: <b>{audext.upper() if audext else 'AAC'}</b>\n"
                          f"<b>└ </b>Subtitle Format: <b>{subext.upper() if subext else 'SRT'}</b>")
@@ -154,11 +153,11 @@ class ExtraSelect:
     async def merge_rmaudio_select(self, streams):
         if isinstance(streams, tuple):
             streams, _ = streams
-        text, buttons = self.streams_select(streams, 'merge_rmaudio')
+        text, buttons = await self.streams_select(streams, 'merge_rmaudio')
         await self.update_message(text, buttons)
 
     async def merge_preremove_audio_select(self, streams_per_file: dict):
-        text, buttons = self.streams_select(streams_per_file, 'merge_preremove_audio')
+        text, buttons = await self.streams_select(streams_per_file, 'merge_preremove_audio')
         await self.update_message(text, buttons)
 
     async def compress_select(self, streams: dict):
@@ -180,7 +179,7 @@ class ExtraSelect:
     async def rmstream_select(self, streams):
         if isinstance(streams, tuple):
             streams, _ = streams
-        text, buttons = self.streams_select(streams, 'rmstream')
+        text, buttons = await self.streams_select(streams, 'rmstream')
         await self.update_message(text, buttons)
 
     async def convert_select(self, streams: dict):
@@ -247,7 +246,7 @@ class ExtraSelect:
                 elif codec_type == 'subtitle' and not ext[1]:
                     ext[1] = 'srt' if codec_name == 'subrip' else 'ass'
             self.extension = ext
-            text, buttons = self.streams_select(streams, 'extract')
+            text, buttons = await self.streams_select(streams, 'extract')
             await self.update_message(text, buttons)
 
     async def get_buttons(self, *args):
