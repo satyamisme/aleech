@@ -38,12 +38,21 @@ class ExtraSelect:
         except TimeoutError:
             self.event.set()
             self.is_cancel = True
+            await self._cleanup()
         except Exception as e:
             LOGGER.error(f"Event handler error: {e}")
             self.is_cancel = True
+            await self._cleanup()
             self.event.set()
         finally:
             self._listener.client.remove_handler(*handler)
+
+    async def _cleanup(self):
+        """Clean up any temporary data or state for this task."""
+        async with data_lock:
+            self.executor.data.clear()
+            self.executor.is_cancel = True
+            self.executor.event.set()
 
     async def update_message(self, text: str, buttons):
         try:
@@ -215,11 +224,13 @@ class ExtraSelect:
                     if (await exc.get_document_type(file_path))[0] or file.endswith(('.srt', '.ass')):
                         self.executor.data['list'][position] = file
                 if not self.executor.data['list']:
+                    await self._cleanup()
                     return self.executor._up_path
                 self.executor.data['final'] = {}
                 self._start_handler()
                 await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
                 if self.is_cancel or not self.executor.data.get('final'):
+                    await self._cleanup()
                     return self.executor._up_path
                 return self.executor._up_path
         else:
@@ -272,6 +283,7 @@ class ExtraSelect:
             await wrap_future(future)
         except Exception as e:
             LOGGER.error(f"Error in get_buttons: {e}")
+            await self._cleanup()
         finally:
             if self._reply:
                 await deleteMessage(self._reply)
@@ -288,7 +300,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
     async with data_lock:
         if data[2] == 'cancel':
             obj.is_cancel = obj.executor.is_cancel = True
-            obj.executor.data = None
+            await obj._cleanup()
             obj.event.set()
         elif data[2] in ['prev', 'next']:
             obj.stream_page[mode] = max(0, obj.stream_page.get(mode, 0) + (1 if data[2] == 'next' else -1))

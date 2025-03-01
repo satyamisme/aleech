@@ -127,16 +127,16 @@ class SelectMode:
         if not mode:
             vid_modes = dict(list(VID_MODE.items())[4:]) if self._isLink else VID_MODE
             for key, value in vid_modes.items():
-                buttons.button_data(f"{'🔥 ' if self.mode == key else ''}{value}", f'vidtool {key}')
-            buttons.button_data(f'{"🔥 " if self.newname else ""}Rename', 'vidtool rename', 'header')
+                buttons.button_data(f"{'🔵 ' if self.mode == key else ''}{value}", f'vidtool {key}')
+            buttons.button_data(f'{"🔵 " if self.newname else ""}Rename', 'vidtool rename', 'header')
             buttons.button_data('Cancel', 'vidtool cancel', 'footer')
             if self.mode:
                 buttons.button_data('Done', 'vidtool done', 'footer')
             if self.mode in ('vid_sub', 'watermark') and await CustomFilters.sudo('', self.listener.message):
                 hardsub = self.extra_data.get('hardsub')
-                buttons.button_data(f"{'🔥 ' if hardsub else ''}Hardsub", 'vidtool hardsub', 'header')
+                buttons.button_data(f"{'🔵 ' if hardsub else ''}Hardsub", 'vidtool hardsub', 'header')
                 if hardsub and self.mode == 'watermark':
-                    buttons.button_data(f"{'🔥 ' if await aiopath.exists(self.extra_data.get('subfile', '')) else ''}Sub File", 'vidtool subfile', 'header')
+                    buttons.button_data(f"{'🔵 ' if await aiopath.exists(self.extra_data.get('subfile', '')) else ''}Sub File", 'vidtool subfile', 'header')
                 buttons.button_data('Font Style', 'vidtool fontstyle', 'header')
             if self.mode in ('compress', 'watermark') or self.extra_data.get('hardsub'):
                 buttons.button_data('Quality', 'vidtool quality', 'header')
@@ -160,7 +160,7 @@ class SelectMode:
                 case 'quality':
                     bnum = 3
                     for key in ['1080p', '720p', '540p', '480p', '360p']:
-                        buttons.button_data(f"{'🔥 ' if self.extra_data.get('quality') == key else ''}{key}", f'vidtool quality {key}')
+                        buttons.button_data(f"{'🔵 ' if self.extra_data.get('quality') == key else ''}{key}", f'vidtool quality {key}')
                     buttons.button_data('<<', 'vidtool back', 'footer')
                     buttons.button_data('Done', 'vidtool done', 'footer')
                 case 'popupwm':
