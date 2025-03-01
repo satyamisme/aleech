@@ -39,7 +39,7 @@ class SelectMode:
     async def _event_handler(self):
         LOGGER.info(f"Starting SelectMode event handler for user {self.listener.user_id}")
         pfunc = partial(cb_vidtools, obj=self)
-        handler = self.listener.client.add_handler(CallbackQueryHandler(pfunc, filters=regex('^vidtool') & user(self._listener.user_id)), group=-1)
+        handler = self.listener.client.add_handler(CallbackQueryHandler(pfunc, filters=regex('^vidtool') & user(self.listener.user_id)), group=-1)
         try:
             await wait_for(self.event.wait(), timeout=180)
             LOGGER.info(f"SelectMode event completed for user {self.listener.user_id}")
@@ -59,7 +59,7 @@ class SelectMode:
     async def message_event_handler(self, mode=''):
         LOGGER.info(f"Starting message event handler for mode {mode}")
         pfunc = partial(message_handler, obj=self, is_sub=mode == 'subfile')
-        handler = self.listener.client.add_handler(MessageHandler(pfunc, user(self._listener.user_id)), group=1)
+        handler = self.listener.client.add_handler(MessageHandler(pfunc, user(self.listener.user_id)), group=1)
         try:
             await wait_for(self.message_event.wait(), timeout=60)
             LOGGER.info(f"Message event completed for mode {mode}")
@@ -76,7 +76,7 @@ class SelectMode:
     async def _send_message(self, text: str, buttons):
         try:
             if not self._reply:
-                self._reply = await sendMessage(text, self._listener.message, buttons)
+                self._reply = await sendMessage(text, self.listener.message, buttons)
                 LOGGER.info(f"Sent initial message for mode selection")
             else:
                 await editMessage(text, self._reply, buttons)

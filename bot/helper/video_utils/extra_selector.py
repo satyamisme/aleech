@@ -48,10 +48,9 @@ class ExtraSelect:
             await self._cleanup()
         finally:
             self._listener.client.remove_handler(*handler)
-            self.event.set()  # Ensure event is set even on error
+            self.event.set()
 
     async def _cleanup(self):
-        """Clean up any temporary data or state for this task."""
         async with data_lock:
             LOGGER.info(f"Cleaning up ExtraSelect for {self.executor.mode}")
             self.executor.data.clear()
@@ -334,7 +333,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
         elif data[2] == 'continue':
             LOGGER.info(f"Continue triggered for {mode}, setting event with data: {obj.executor.data}")
             obj.event.set()
-            await asyncio.sleep(1)  # Ensure event propagates
+            await asyncio.sleep(1)
             LOGGER.info(f"Event set for {mode}, selections: {obj.executor.data.get('streams_to_remove', [])}")
         elif mode == 'merge_rmaudio':
             if data[2] == 'all':
@@ -383,7 +382,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                 await obj.merge_preremove_audio_select(obj.executor.data.get('streams_per_file', {}))
             else:
                 try:
-                    stream_key = data[2]  # Keep as string for file-specific keys
+                    stream_key = data[2]
                     streams_to_remove = obj.executor.data.get('streams_to_remove', [])
                     if stream_key in streams_to_remove:
                         streams_to_remove.remove(stream_key)
