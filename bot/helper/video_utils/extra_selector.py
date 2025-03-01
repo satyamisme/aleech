@@ -114,9 +114,10 @@ class ExtraSelect:
             if mode == 'extract':
                 buttons.button_data('🔥 ALT Mode' if ddict.get('alt_mode') else 'ALT Mode', f"extra {mode} alt {ddict.get('alt_mode', False)}", 'footer')
                 audext, subext, vidext = self.extension
+                # Fixed syntax error here by properly closing the f-string and parentheses
                 text += (f"\n<b>┌ </b>Video Format: <b>{vidext.upper()}</b>\n"
-                         f'<b>├ </b>Audio Format: <b>{audext.upper() if audext else 'AAC'}</b>\n'
-                         f'<b>└ </b>Subtitle Format: <b>{subext.upper() if subext else 'SRT'}</b>")
+                         f"<b>├ </b>Audio Format: <b>{audext.upper() if audext else 'AAC'}</b>\n"
+                         f"<b>└ </b>Subtitle Format: <b>{subext.upper() if subext else 'SRT'}</b>")
                 for ext in self.extension:
                     buttons.button_data(ext.upper() if ext else 'DEFAULT', f'extra {mode} extension {ext or "default"}', 'header')
                 buttons.button_data('Extract All', f'extra {mode} video audio subtitle')
