@@ -106,18 +106,19 @@ class ExtraSelect:
         return text, buttons.build_menu(2)
 
     async def merge_rmaudio_select(self, streams):
-        # Ensure streams is a list of dicts or None; initialize only if streams is provided
-        if streams is not None and isinstance(streams, (list, tuple)):
+        if streams is not None and isinstance(streams, (list, tuple)):  # Initial call from get_buttons
             self.executor.data['streams'] = {}
-            self.executor.data['audio_remove'] = []
+            self.executor.data['audio_remove'] = self.executor.data.get('audio_remove', [])
             buttons = ButtonMaker()
             for stream in streams:
                 if isinstance(stream, dict) and stream.get('codec_type') == 'audio':
                     index = stream['index']
                     lang = stream.get('tags', {}).get('language', str(index))
                     self.executor.data['streams'][index] = {'map': index, 'type': 'audio', 'lang': lang}
-                    buttons.button_data(f"Audio ~ {lang.upper()}", f"extra merge_rmaudio {index}")
-            buttons.button_data("Remove All Audio", "extra merge_rmaudio all")
+                    selected = index in self.executor.data['audio_remove']
+                    buttons.button_data(f"{'🔥 ' if selected else ''}Audio ~ {lang.upper()}", f"extra merge_rmaudio {index}")
+            buttons.button_data("Remove All Audio" if self.executor.data['audio_remove'] != 'all' else "🔥 Remove All Audio", 
+                                "extra merge_rmaudio all")
             buttons.button_data("Continue (Keep All)", "extra merge_rmaudio continue", 'footer')
             buttons.button_data("Cancel", "extra cancel", 'footer')
             text = (f"<b>Merge and Remove Audio ~ {self._listener.tag}</b>\n"
@@ -125,16 +126,16 @@ class ExtraSelect:
                     f"File Size: <b>{get_readable_file_size(self.executor.size)}</b>\n\n"
                     "Select audio streams to remove from merged file:")
             await self.update_message(text, buttons.build_menu(2))
-        else:
-            # If called from cb_extra, update UI with existing selections
+        else:  # Callback refresh
             buttons = ButtonMaker()
+            audio_remove = self.executor.data.get('audio_remove', [])
             for index, stream in self.executor.data.get('streams', {}).items():
                 if stream['type'] == 'audio':
-                    selected = index in self.executor.data.get('audio_remove', [])
+                    selected = index in audio_remove or audio_remove == 'all'
                     buttons.button_data(f"{'🔥 ' if selected else ''}Audio ~ {stream['lang'].upper()}", 
-                                       f"extra merge_rmaudio {index}")
-            buttons.button_data("Remove All Audio" if self.executor.data.get('audio_remove') != 'all' else "🔥 Remove All Audio", 
-                               "extra merge_rmaudio all")
+                                        f"extra merge_rmaudio {index}")
+            buttons.button_data("Remove All Audio" if audio_remove != 'all' else "🔥 Remove All Audio", 
+                                "extra merge_rmaudio all")
             buttons.button_data("Continue (Keep All)", "extra merge_rmaudio continue", 'footer')
             buttons.button_data("Cancel", "extra cancel", 'footer')
             text = (f"<b>Merge and Remove Audio ~ {self._listener.tag}</b>\n"
@@ -242,32 +243,34 @@ class ExtraSelect:
         text = ''
         index = 1
         if not self.status:
-            for possition, file in self.executor.data['list'].items():
-                if (await exc.get_document_type(os.path.join(self.executor.path, file)))[0] or file.endswith(('.srt', '.ass')):
-                    self.executor.data['list'].update({index: file})
+            self.executor.data['list'] = {}
+            for position, file in enumerate(natsorted(await listdir(self.executor.path)), 1):
+                file_path = os.path.join(self.executor.path, file)
+                if (await exc.get_document_type(file_path))[0] or file.endswith(('.srt', '.ass')):
+                    self.executor.data['list'][position] = file
                     index += 1
             if not self.executor.data['list']:
                 return self.executor._up_path
+            self.executor.data['final'] = {}
             self._start_handler()
             await gather(self._send_status(), self.event.wait())
 
             if self.is_cancel:
                 return
-            if not self.data or not self.data['final']:
+            if not self.data or not self.data.get('final'):
                 return self.executor._up_path
-            for key in self.data['final'].values():
-                sub_files.append(os.path.join(self.executor.path, key['file']))
-                ref_files.append(os.path.join(self.executor.path, key['ref']))
+            sub_files = [os.path.join(self.executor.path, key['file']) for key in self.data['final'].values()]
+            ref_files = [os.path.join(self.executor.path, key['ref']) for key in self.data['final'].values()]
         else:
-            file: dict = self.executor.data['list'][self.status]
+            file = self.executor.data['list'][self.status]
             text = (f'Current: <b>{file}</b>\n'
                     f'References: <b>{ref}</b>\n' if (ref := self.executor.data['final'].get(self.status, {}).get('ref')) else ''
                     '\nSelect Available References Below!\n')
             self.executor.data['final'][self.status] = {'file': file}
-            for possition, file in self.executor.data['list'].items():
-                if possition != self.status and file not in self.executor.data['final'].values():
+            for position, file in self.executor.data['list'].items():
+                if position != self.status and file not in [v['file'] for v in self.executor.data['final'].values()]:
                     text += f'{index}. {file}\n'
-                    buttons.button_data(index, f'extra subsync select {possition}')
+                    buttons.button_data(str(index), f'extra subsync select {position}')
                     index += 1
         await self.update_message(text, buttons.build_menu(5))
 
@@ -280,7 +283,7 @@ class ExtraSelect:
                 match codec_type:
                     case 'mp3':
                         ext[0] = 'ac3'
-                    case 'aac' | 'ac3' | 'ac3' | 'eac3' | 'm4a' | 'mka' | 'wav' as value:
+                    case 'aac' | 'ac3' | 'eac3' | 'm4a' | 'mka' | 'wav' as value:
                         ext[0] = value
                     case _:
                         ext[0] = 'aac'
@@ -339,7 +342,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             else:
                 audio_remove.append(mapindex)
             obj.executor.data['audio_remove'] = audio_remove
-            await obj.merge_rmaudio_select(None)  # Pass None to update UI with current selections
+            await obj.merge_rmaudio_select(None)  # Refresh UI with current selections
     elif mode == 'merge_preremove_audio':
         files = list(obj.executor.data['streams_per_file'].keys())
         current_file = obj.status or files[0] if files else None
@@ -397,7 +400,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
         ddict: dict = obj.executor.data
         match data[2]:
             case 'reset':
-                if sdata := ddict['sdata']:
+                if sdata := ddict.get('sdata'):
                     for mapindex in sdata:
                         info = ddict['stream'][mapindex]['info']
                         ddict['stream'][mapindex]['info'] = info.replace('🔥 ', '')
@@ -406,7 +409,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                 else:
                     await query.answer('No any selected stream to reset!', True)
             case 'continue':
-                if ddict['sdata']:
+                if ddict.get('sdata'):
                     obj.event.set()
                 else:
                     await query.answer('Please select at least one stream!', True)
@@ -414,7 +417,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                 obj.executor.data['key'] = value
                 obj.event.set()
             case 'reverse':
-                if ddict['sdata']:
+                if ddict.get('sdata'):
                     new_sdata = [x for x in ddict['stream'] if x not in ddict['sdata'] and x != 0]
                     for key, value in ddict['stream'].items():
                         info = value['info']
@@ -454,5 +457,5 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             await obj.update_message(*obj.streams_select())
         else:
             obj.executor.data.update({'key': int(value) if value.isdigit() else data[2:],
-                                    'extension': obj.extension})
+                                     'extension': obj.extension})
             obj.event.set()

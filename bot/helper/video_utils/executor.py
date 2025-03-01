@@ -31,7 +31,7 @@ async def get_metavideo(video_file):
 
 class VidEcxecutor(FFProgress):
     def __init__(self, listener: task.TaskListener, path: str, gid: str, metadata=False):
-        self.data = {}  # Fixed initialization
+        self.data = {}  # Initialized as dict to avoid NoneType errors
         self.event = Event()
         self.listener = listener
         self.path = path
@@ -159,11 +159,13 @@ class VidEcxecutor(FFProgress):
                 for file in files:
                     if file.endswith(tuple(self.listener.extensionFilter)):
                         await clean_target(ospath.join(dirpath, file))
+
             all_files = []
             for dirpath, _, files in await sync_to_async(walk, scan_dir):
                 all_files.extend((dirpath, file) for file in files)
             if len(all_files) == 1:
                 self._up_path = ospath.join(*all_files[0])
+
         return self._up_path
 
     async def _name_base_dir(self, path, info: str=None, multi: bool=False):
@@ -208,7 +210,7 @@ class VidEcxecutor(FFProgress):
 
         self._start_handler(streams)
         await gather(self._send_status(), self.event.wait())
-        await self._queue()
+        await self._queue(update=True)
         if self.is_cancel or not self.data:
             return self._up_path
 
@@ -218,11 +220,12 @@ class VidEcxecutor(FFProgress):
         async with aiopen(input_file, 'w') as f:
             await f.write('\n'.join([f"file '{f}'" for f in file_list]))
         cmd = [FFMPEG_NAME, '-f', 'concat', '-safe', '0', '-i', input_file]
-        if self.data.get('audio_remove') == 'all':
+        audio_remove = self.data.get('audio_remove', [])
+        if audio_remove == 'all':
             cmd.extend(('-map', '0', '-map', '-0:a'))
-        elif self.data.get('audio_remove'):
+        elif audio_remove:
             kept_streams = [f'0:{s["map"]}' for s in self.data['streams'].values() 
-                          if s['type'] != 'audio' or s['map'] not in self.data['audio_remove']]
+                           if s['type'] != 'audio' or s['map'] not in audio_remove]
             cmd.extend(['-map'] + kept_streams if kept_streams else ['-map', '0:v'])
         else:
             cmd.extend(('-map', '0'))
@@ -247,7 +250,7 @@ class VidEcxecutor(FFProgress):
 
         self._start_handler(streams_per_file)
         await gather(self._send_status(), self.event.wait())
-        await self._queue()
+        await self._queue(update=True)
         if self.is_cancel or not self.data:
             return self._up_path
 
@@ -264,7 +267,7 @@ class VidEcxecutor(FFProgress):
                 cmd.extend(('-map', '0', '-map', '-0:a'))
             else:
                 kept_streams = [f'0:{s["index"]}' for s in streams 
-                              if s['codec_type'] != 'audio' or s['index'] not in selections]
+                               if s['codec_type'] != 'audio' or s['index'] not in selections]
                 cmd.extend(['-map'] + kept_streams if kept_streams else ['-map', '0:v'])
             cmd.extend(('-c', 'copy', outfile, '-y'))
             if await self._run_cmd(cmd):
@@ -301,8 +304,8 @@ class VidEcxecutor(FFProgress):
             cmd.extend(('-map', '0', '-map', '-0:a'))
         elif selections:
             kept_streams = [f'0:{s["index"] if self.mode == "merge_preremove_audio" else s["map"]}' 
-                          for s in streams if s['codec_type'] != 'audio' or 
-                          (s['index'] if self.mode == "merge_preremove_audio" else s['map']) not in selections]
+                           for s in streams if s['codec_type'] != 'audio' or 
+                           (s['index'] if self.mode == "merge_preremove_audio" else s['map']) not in selections]
             cmd.extend(['-map'] + kept_streams if kept_streams else ['-map', '0:v'])
         else:
             return self._up_path
@@ -310,8 +313,300 @@ class VidEcxecutor(FFProgress):
         await self._run_cmd(cmd)
         return await self._final_path()
 
+    async def _merge_vids(self):
+        list_files = []
+        for dirpath, _, files in await sync_to_async(walk, self.path):
+            if len(files) == 1:
+                return self._up_path
+            for file in natsorted(files):
+                video_file = ospath.join(dirpath, file)
+                if (await get_document_type(video_file))[0]:
+                    self.size += await get_path_size(video_file)
+                    list_files.append(f"file '{video_file}'")
+                    self._files.append(video_file)
+
+        self.outfile = self._up_path
+        if len(list_files) > 1:
+            await self._name_base_dir(self.path)
+            await update_status_message(self.listener.message.chat.id)
+            input_file = ospath.join(self.path, 'input.txt')
+            async with aiopen(input_file, 'w') as f:
+                await f.write('\n'.join(list_files))
+
+            self.outfile = ospath.join(self.path, self.name)
+            cmd = [FFMPEG_NAME, '-ignore_unknown', '-f', 'concat', '-safe', '0', '-i', input_file, '-map', '0', '-c', 'copy', self.outfile, '-y']
+            await self._run_cmd(cmd, 'direct')
+            await clean_target(input_file)
+            if self.is_cancel:
+                return
+
+        return await self._final_path()
+
+    async def _merge_auds(self):
+        main_video = False
+        for dirpath, _, files in await sync_to_async(walk, self.path):
+            if len(files) == 1:
+                return self._up_path
+            for file in natsorted(files):
+                file = ospath.join(dirpath, file)
+                is_video, is_audio, _ = await get_document_type(file)
+                if is_video:
+                    if main_video:
+                        continue
+                    main_video = file
+                if is_audio:
+                    self.size += await get_path_size(file)
+                    self._files.append(file)
+
+        self._files.insert(0, main_video)
+        self.outfile = self._up_path
+        if len(self._files) > 1:
+            _, size = await gather(self._name_base_dir(self.path), get_path_size(main_video))
+            self.size += size
+            await update_status_message(self.listener.message.chat.id)
+            cmd = [FFMPEG_NAME, '-hide_banner', '-ignore_unknown']
+            for i in self._files:
+                cmd.extend(('-i', i))
+            cmd.extend(('-map', '0:v:0?', '-map', '0:a:?'))
+            for j in range(1, len(self._files)):
+                cmd.extend(('-map', f'{j}:a'))
+
+            self.outfile = ospath.join(self.path, self.name)
+            streams = (await get_metavideo(main_video))[0]
+            audio_track = len([1+i for i in range(len(streams)) if streams[i]['codec_type'] == 'audio'])
+            cmd.extend((f'-disposition:s:a:{audio_track if audio_track == 0 else audio_track+1}', 'default', '-map', '0:s:?', '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'copy', self.outfile, '-y'))
+            await self._run_cmd(cmd, 'direct')
+            if self.is_cancel:
+                return
+
+        return await self._final_path()
+
+    async def _merge_subs(self, **kwargs):
+        main_video = False
+        for dirpath, _, files in await sync_to_async(walk, self.path):
+            if len(files) == 1:
+                return self._up_path
+            for file in natsorted(files):
+                file = ospath.join(dirpath, file)
+                is_video, is_sub = (await get_document_type(file))[0], file.endswith(('.ass', '.srt', '.vtt'))
+                if is_video:
+                    if main_video:
+                        continue
+                    main_video = file
+                if is_sub:
+                    self.size += await get_path_size(file)
+                    self._files.append(file)
+
+        self._files.insert(0, main_video)
+        self.outfile = self._up_path
+        if len(self._files) > 1:
+            _, size = await gather(self._name_base_dir(self.path), get_path_size(main_video))
+            self.size += size
+            cmd = [FFMPEG_NAME, '-hide_banner', '-ignore_unknown', '-y']
+            self.outfile, status = ospath.join(self.path, self.name), 'direct'
+            if kwargs.get('hardsub'):
+                self.path, status = self._files[0], 'prog'
+                cmd.extend(('-i', self.path, '-vf'))
+                fontname = kwargs.get('fontname', '').replace('_', ' ') or config_dict['HARDSUB_FONT_NAME']
+                fontsize = f',FontSize={fontsize}' if (fontsize := kwargs.get('fontsize') or config_dict['HARDSUB_FONT_SIZE']) else ''
+                fontcolour = f',PrimaryColour=&H{kwargs["fontcolour"]}' if kwargs.get('fontcolour') else ''
+                boldstyle = ',Bold=1' if kwargs.get('boldstyle') else ''
+                quality = f',scale={self._qual[kwargs["quality"]]}:-2' if kwargs.get('quality') else ''
+
+                cmd.append(f"subtitles='{self._files[1]}':force_style='FontName={fontname},Shadow=1.5{fontsize}{fontcolour}{boldstyle}'{quality},unsharp,eq=contrast=1.07")
+
+                if config_dict['VIDTOOLS_FAST_MODE']:
+                    cmd.extend(('-preset', config_dict['LIB264_PRESET'], '-c:v', 'libx264', '-crf', '24'))
+                    extra = ['-map', '0:a:?', '-c:a', 'copy']
+                else:
+                    cmd.extend(('-preset', config_dict['LIB265_PRESET'], '-c:v', 'libx265', '-pix_fmt', 'yuv420p10le', '-crf', '24',
+                                '-profile:v', 'main10', '-x265-params', 'no-info=1', '-bsf:v', 'filter_units=remove_types=6'))
+                    extra = ['-c:a', 'aac', '-b:a', '160k', '-map', '0:1']
+                cmd.extend(['-map', '0:v:0?', '-map', '-0:s'] + extra + [self.outfile])
+            else:
+                for i in self._files:
+                    cmd.extend(('-i', i))
+                cmd.extend(('-map', '0:v:0?', '-map', '0:a:?', '-map', '0:s:?'))
+                for j in range(1, (len(self._files))):
+                    cmd.extend(('-map', f'{j}:s'))
+                cmd.extend(('-c:v', 'copy', '-c:a', 'copy', '-c:s', 'srt', self.outfile))
+            await self._run_cmd(cmd, status)
+            if self.is_cancel:
+                return
+
+        return await self._final_path()
+
+    async def _vid_trimmer(self, start_time, end_time):
+        await self._queue(True)
+        if self.is_cancel:
+            return
+        self.outfile = self._up_path
+        for file in (file_list := await self._get_files()):
+            self.path = file
+            if self._metadata:
+                base_dir = self.listener.dir
+                await makedirs(base_dir, exist_ok=True)
+            else:
+                base_dir, self.size = await gather(self._name_base_dir(self.path, 'Trim', len(file_list) > 1), get_path_size(self.path))
+            self.outfile = ospath.join(base_dir, self.name)
+            self._files.append(self.path)
+            cmd = [FFMPEG_NAME, '-hide_banner', '-ignore_unknown', '-i', self.path, '-ss', start_time, '-to', end_time,
+                   '-map', '0:v:0?', '-map', '0:a:?', '-map', '0:s:?', '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'copy', self.outfile, '-y']
+            await self._run_cmd(cmd)
+            if self.is_cancel:
+                return
+
+        return await self._final_path()
+
+    async def _subsync(self, type: str='sync_manual'):
+        if not self._is_dir:
+            return self._up_path
+        self.size = await get_path_size(self.path)
+        list_files = natsorted(await listdir(self.path))
+        if len(list_files) <= 1:
+            return self._up_path
+        sub_files, ref_files = [], []
+        if type == 'sync_manual':
+            index = 1
+            self.data = {'list': {}, 'final': {}}
+            for file in list_files:
+                if (await get_document_type(ospath.join(self.path, file)))[0] or file.endswith(('.srt', '.ass')):
+                    self.data['list'].update({index: file})
+                    index += 1
+            if not self.data['list']:
+                return self._up_path
+            self._start_handler()
+            await gather(self._send_status(), self.event.wait())
+
+            if self.is_cancel:
+                return
+            if not self.data or not self.data['final']:
+                return self._up_path
+            for key in self.data['final'].values():
+                sub_files.append(ospath.join(self.path, key['file']))
+                ref_files.append(ospath.join(self.path, key['ref']))
+        else:
+            for file in list_files:
+                file_ = ospath.join(self.path, file)
+                is_video, is_audio, _ = await get_document_type(file_)
+                if is_video or is_audio:
+                    ref_files.append(file_)
+                elif file_.lower().endswith(('.srt', '.ass')):
+                    sub_files.append(file_)
+
+            if not sub_files:
+                return self._up_path
+
+            if not ref_files and len(sub_files) > 1:
+                ref_files = list(filter(lambda x: (x, sub_files.remove(x)), sub_files))
+
+            if not ref_files or not sub_files:
+                return self._up_path
+
+        for sub_file, ref_file in zip(sub_files, ref_files):
+            self._files.extend((sub_file, ref_file))
+            self.size = await get_path_size(ref_file)
+            self.name = ospath.basename(sub_file)
+            name, ext = ospath.splitext(sub_file)
+            cmd = ['alass', '--allow-negative-timestamps', ref_file, sub_file, f'{name}_SYNC.{ext}']
+            await self._run_cmd(cmd, 'direct')
+            if self.is_cancel:
+                return
+
+        return await self._final_path(self._up_path)
+
+    async def _vid_compress(self, quality=None):
+        file_list = await self._get_files()
+        multi = len(file_list) > 1
+        if not file_list:
+            return self._up_path
+
+        if self._metadata:
+            base_dir = self.listener.dir
+            await makedirs(base_dir, exist_ok=True)
+            streams = self._metadata[0]
+        else:
+            main_video = file_list[0]
+            base_dir, (streams, _), self.size = await gather(self._name_base_dir(main_video, 'Compress', multi),
+                                                             get_metavideo(main_video), get_path_size(main_video))
+        self._start_handler(streams)
+        await gather(self._send_status(), self.event.wait())
+        await self._queue()
+        if self.is_cancel:
+            return
+        if not isinstance(self.data, dict):
+            return self._up_path
+
+        self.outfile = self._up_path
+        for file in file_list:
+            self.path = file
+            if not self._metadata:
+                _, self.size = await gather(self._name_base_dir(self.path, 'Compress', multi), get_path_size(self.path))
+            self.outfile = ospath.join(base_dir, self.name)
+            self._files.append(self.path)
+            cmd = [FFMPEG_NAME, '-hide_banner', '-ignore_unknown', '-y', '-i', self.path, '-preset', config_dict['LIB265_PRESET'], '-c:v', 'libx265',
+                   '-pix_fmt', 'yuv420p10le', '-crf', '24', '-profile:v', 'main10', '-map', f'0:{self.data["video"]}', '-map', '0:s:?', '-c:s', 'copy']
+            if banner := config_dict['COMPRESS_BANNER']:
+                sub_file = ospath.join(base_dir, 'subtitle.srt')
+                self._files.append(sub_file)
+                quality = f',scale={self._qual[quality]}:-2' if quality else ''
+                async with aiopen(sub_file, 'w') as f:
+                    await f.write(f'1\n00:00:03,000 --> 00:00:08,00\n{banner}')
+                cmd.extend(('-vf', f"subtitles='{sub_file}'{quality},unsharp,eq=contrast=1.07", '-metadata', f'title={banner}', '-metadata:s:v',
+                            f'title={banner}', '-x265-params', 'no-info=1', '-bsf:v', 'filter_units=remove_types=6'))
+            elif quality:
+                cmd.extend(('-vf', f'scale={self._qual[quality]}:-2'))
+
+            cmd.extend(('-c:a', 'aac', '-b:a', '160k', '-map', f'0:{self.data["audio"]}?', self.outfile) if self.data else [self.outfile])
+            await self._run_cmd(cmd)
+            if self.is_cancel:
+                return
+
+        return await self._final_path()
+
+    async def _vid_marker(self, **kwargs):
+        await self._queue(True)
+        if self.is_cancel:
+            return
+        wmpath = ospath.join('watermark', f'{self.listener.mid}.png')
+        for file in (file_list := await self._get_files()):
+            self.path = file
+            self._files.append(self.path)
+            if self._metadata:
+                base_dir, fsize = self.listener.dir, self.size
+                await makedirs(base_dir, exist_ok=True)
+            else:
+                await self._name_base_dir(self.path, 'Marker', len(file_list) > 1)
+                base_dir, fsize = await gather(self._name_base_dir(self.path, 'Marker', len(file_list) > 1), get_path_size(self.path))
+            self.size = fsize + await get_path_size(wmpath)
+            self.outfile = ospath.join(base_dir, self.name)
+            wmsize, wmposition, popupwm = kwargs.get('wmsize'), kwargs.get('wmposition'), kwargs.get('popupwm') or ''
+            if popupwm:
+                duration = (await get_media_info(self.path))[0]
+                popupwm = f':enable=lt(mod(t\,{duration}/{popupwm})\,20)'
+
+            hardusb, subfile = kwargs.get('hardsub') or '', kwargs.get('subfile', '')
+            if hardusb and await aiopath.exists(subfile):
+                fontname = kwargs.get('fontname', '').replace('_', ' ') or config_dict['HARDSUB_FONT_NAME']
+                fontsize = f',FontSize={fontsize}' if (fontsize := kwargs.get('fontsize') or config_dict['HARDSUB_FONT_SIZE']) else ''
+                fontcolour = f',PrimaryColour=&H{kwargs["fontcolour"]}' if kwargs.get('fontcolour') else ''
+                boldstyle = ',Bold=1' if kwargs.get('boldstyle') else ''
+                hardusb = f",subtitles='{subfile}':force_style='FontName={fontname},Shadow=1.5{fontsize}{fontcolour}{boldstyle}',unsharp,eq=contrast=1.07"
+
+            quality = f',scale={self._qual[kwargs["quality"]]}:-2' if kwargs.get('quality') else ''
+            cmd = [FFMPEG_NAME, '-hide_banner', '-ignore_unknown', '-y', '-i', self.path, '-i', wmpath, '-filter_complex',
+                   f"[1][0]scale2ref=w='iw*{wmsize}/100':h='ow/mdar'[wm][vid];[vid][wm]overlay={wmposition}{popupwm}{quality}{hardusb}"]
+            if config_dict['VIDTOOLS_FAST_MODE']:
+                cmd.extend(('-c:v', 'libx264', '-preset', config_dict['LIB264_PRESET'], '-crf', '25'))
+            cmd.extend(('-map', '0:a:?', '-map', '0:s:?', '-c:a', 'copy', '-c:s', 'copy', self.outfile))
+            await self._run_cmd(cmd)
+            if self.is_cancel:
+                return
+        await gather(clean_target(wmpath), clean_target(subfile))
+
+        return await self._final_path()
+
     async def _vid_extract(self):
-        # Unchanged from your original
         if file_list := await self._get_files():
             if self._metadata:
                 base_dir = ospath.join(self.listener.dir, self.name.split('.', 1)[0])
@@ -389,10 +684,9 @@ class VidEcxecutor(FFProgress):
                     await move(file, self._up_path)
 
         await gather(*[clean_target(file) for file in task_files])
-        return await self._final_path()
+        return await self._final_path(self._up_path)
 
     async def _vid_convert(self):
-        # Unchanged from your original
         file_list = await self._get_files()
         multi = len(file_list) > 1
         if not file_list:
@@ -404,7 +698,7 @@ class VidEcxecutor(FFProgress):
             streams = self._metadata[0]
         else:
             main_video = file_list[0]
-            base_dir, (streams, _), self.size = await gather(self._name_base_dir(main_video, 'Convert', len(file_list) > 1),
+            base_dir, (streams, _), self.size = await gather(self._name_base_dir(main_video, 'Convert', multi),
                                                              get_metavideo(main_video), get_path_size(main_video))
         self._start_handler(streams)
         await gather(self._send_status(), self.event.wait())
@@ -429,7 +723,6 @@ class VidEcxecutor(FFProgress):
         return await self._final_path()
 
     async def _rm_stream(self):
-        # Unchanged from your original
         file_list = await self._get_files()
         multi = len(file_list) > 1
         if not file_list:
@@ -470,306 +763,6 @@ class VidEcxecutor(FFProgress):
                         cmd.extend(('-map', f'0:{x}'))
             cmd.extend(('-c', 'copy', self.outfile))
             await self._run_cmd(cmd)
-            if self.is_cancel:
-                return
-
-        return await self._final_path()
-
-    async def _vid_trimmer(self, start_time, end_time):
-        # Unchanged from your original
-        await self._queue(True)
-        if self.is_cancel:
-            return
-        self.outfile = self._up_path
-        for file in (file_list := await self._get_files()):
-            self.path = file
-            if self._metadata:
-                base_dir = self.listener.dir
-                await makedirs(base_dir, exist_ok=True)
-            else:
-                base_dir, self.size = await gather(self._name_base_dir(self.path, 'Trim', len(file_list) > 1), get_path_size(self.path))
-            self.outfile = ospath.join(base_dir, self.name)
-            self._files.append(self.path)
-            cmd = [FFMPEG_NAME, '-hide_banner', '-ignore_unknown', '-i', self.path, '-ss', start_time, '-to', end_time,
-                   '-map', '0:v:0?', '-map', '0:a:?', '-map', '0:s:?', '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'copy',  self.outfile, '-y']
-            await self._run_cmd(cmd)
-            if self.is_cancel:
-                return
-
-        return await self._final_path()
-
-    async def _subsync(self, type: str='sync_manual'):
-        # Unchanged from your original
-        if not self._is_dir:
-            return self._up_path
-        self.size = await get_path_size(self.path)
-        list_files = natsorted(await listdir(self.path))
-        if len(list_files) <= 1:
-            return self._up_path
-        sub_files, ref_files = [], []
-        if type == 'sync_manual':
-            index = 1
-            self.data = {'list': {}, 'final': {}}
-            for file in list_files:
-                if (await get_document_type(ospath.join(self.path, file)))[0] or file.endswith(('.srt', '.ass')):
-                    self.data['list'].update({index: file})
-                    index += 1
-            if not self.data['list']:
-                return self._up_path
-            self._start_handler()
-            await gather(self._send_status(), self.event.wait())
-
-            if self.is_cancel:
-                return
-            if not self.data or not self.data['final']:
-                return self._up_path
-            for key in self.data['final'].values():
-                sub_files.append(ospath.join(self.path, key['file']))
-                ref_files.append(ospath.join(self.path, key['ref']))
-        else:
-            for file in list_files:
-                file_ = ospath.join(self.path, file)
-                is_video, is_audio, _ = await get_document_type(file_)
-                if is_video or is_audio:
-                    ref_files.append(file_)
-                elif file_.lower().endswith(('.srt', '.ass')):
-                    sub_files.append(file_)
-
-            if not sub_files:
-                return self._up_path
-
-            if not ref_files and len(sub_files) > 1:
-                ref_files = list(filter(lambda x: (x, sub_files.remove(x)), sub_files))
-
-            if not ref_files or not sub_files:
-                return self._up_path
-
-        for sub_file, ref_file in zip(sub_files, ref_files):
-            self._files.extend((sub_file, ref_file))
-            self.size = await get_path_size(ref_file)
-            self.name = ospath.basename(sub_file)
-            name, ext = ospath.splitext(sub_file)
-            cmd = ['alass', '--allow-negative-timestamps', ref_file, sub_file, f'{name}_SYNC.{ext}']
-            await self._run_cmd(cmd, 'direct')
-            if self.is_cancel:
-                return
-
-        return await self._final_path(self._up_path)
-
-    async def _vid_compress(self, quality=None):
-        # Unchanged from your original
-        file_list = await self._get_files()
-        multi = len(file_list) > 1
-        if not file_list:
-            return self._up_path
-
-        if self._metadata:
-            base_dir = self.listener.dir
-            await makedirs(base_dir, exist_ok=True)
-            streams = self._metadata[0]
-        else:
-            main_video = file_list[0]
-            base_dir, (streams, _), self.size = await gather(self._name_base_dir(main_video, 'Compress', multi),
-                                                             get_metavideo(main_video), get_path_size(main_video))
-        self._start_handler(streams)
-        await gather(self._send_status(), self.event.wait())
-        await self._queue()
-        if self.is_cancel:
-            return
-        if not isinstance(self.data, dict):
-            return self._up_path
-
-        self.outfile = self._up_path
-        for file in file_list:
-            self.path = file
-            if not self._metadata:
-                _, self.size = await gather(self._name_base_dir(self.path, 'Compress', multi), get_path_size(self.path))
-            self.outfile = ospath.join(base_dir, self.name)
-            self._files.append(self.path)
-            cmd = [FFMPEG_NAME, '-hide_banner', '-ignore_unknown', '-y', '-i', self.path, '-preset', config_dict['LIB265_PRESET'], '-c:v', 'libx265',
-                   '-pix_fmt', 'yuv420p10le', '-crf', '24', '-profile:v', 'main10', '-map', f'0:{self.data["video"]}', '-map', '0:s:?', '-c:s', 'copy']
-            if banner := config_dict['COMPRESS_BANNER']:
-                sub_file = ospath.join(base_dir, 'subtitle.srt')
-                self._files.append(sub_file)
-                quality = f',scale={self._qual[quality]}:-2' if quality else ''
-                async with aiopen(sub_file, 'w') as f:
-                    await f.write(f'1\n00:00:03,000 --> 00:00:08,00\n{banner}')
-                cmd.extend(('-vf', f"subtitles='{sub_file}'{quality},unsharp,eq=contrast=1.07", '-metadata', f'title={banner}', '-metadata:s:v',
-                            f'title={banner}', '-x265-params', 'no-info=1', '-bsf:v', 'filter_units=remove_types=6'))
-            elif quality:
-                cmd.extend(('-vf', f'scale={self._qual[quality]}:-2'))
-
-            cmd.extend(('-c:a', 'aac', '-b:a', '160k', '-map', f'0:{self.data["audio"]}?', self.outfile) if self.data else [self.outfile])
-            await self._run_cmd(cmd)
-            if self.is_cancel:
-                return
-
-        return await self._final_path()
-
-    async def _vid_marker(self, **kwargs):
-        # Unchanged from your original
-        await self._queue(True)
-        if self.is_cancel:
-            return
-        wmpath = ospath.join('watermark', f'{self.listener.mid}.png')
-        for file in (file_list := await self._get_files()):
-            self.path = file
-            self._files.append(self.path)
-            if self._metadata:
-                base_dir, fsize = self.listener.dir, self.size
-                await makedirs(base_dir, exist_ok=True)
-            else:
-                await self._name_base_dir(self.path, 'Marker', len(file_list) > 1)
-                base_dir, fsize = await gather(self._name_base_dir(self.path, 'Marker', len(file_list) > 1), get_path_size(self.path))
-            self.size = fsize + await get_path_size(wmpath)
-            self.outfile = ospath.join(base_dir, self.name)
-            wmsize, wmposition, popupwm = kwargs.get('wmsize'), kwargs.get('wmposition'), kwargs.get('popupwm') or ''
-            if popupwm:
-                duration = (await get_media_info(self.path))[0]
-                popupwm = f':enable=lt(mod(t\,{duration}/{popupwm})\,20)'
-
-            hardusb, subfile = kwargs.get('hardsub') or '', kwargs.get('subfile', '')
-            if hardusb and await aiopath.exists(subfile):
-                fontname = kwargs.get('fontname', '').replace('_', ' ') or config_dict['HARDSUB_FONT_NAME']
-                fontsize = f',FontSize={fontsize}' if (fontsize := kwargs.get('fontsize') or config_dict['HARDSUB_FONT_SIZE']) else ''
-                fontcolour = f',PrimaryColour=&H{kwargs["fontcolour"]}' if kwargs.get('fontcolour') else ''
-                boldstyle = ',Bold=1' if kwargs.get('boldstyle') else ''
-                hardusb = f",subtitles='{subfile}':force_style='FontName={fontname},Shadow=1.5{fontsize}{fontcolour}{boldstyle}',unsharp,eq=contrast=1.07"
-
-            quality = f',scale={self._qual[kwargs["quality"]]}:-2' if kwargs.get('quality') else ''
-            cmd = [FFMPEG_NAME, '-hide_banner', '-ignore_unknown', '-y', '-i', self.path, '-i', wmpath, '-filter_complex',
-                   f"[1][0]scale2ref=w='iw*{wmsize}/100':h='ow/mdar'[wm][vid];[vid][wm]overlay={wmposition}{popupwm}{quality}{hardusb}"]
-            if config_dict['VIDTOOLS_FAST_MODE']:
-                cmd.extend(('-c:v', 'libx264', '-preset', config_dict['LIB264_PRESET'], '-crf', '25'))
-            cmd.extend(('-map', '0:a:?', '-map', '0:s:?', '-c:a', 'copy', '-c:s', 'copy', self.outfile))
-            await self._run_cmd(cmd)
-            if self.is_cancel:
-                return
-        await gather(clean_target(wmpath), clean_target(subfile))
-
-        return await self._final_path()
-
-    async def _merge_vids(self):
-        # Unchanged from your original
-        list_files = []
-        for dirpath, _, files in await sync_to_async(walk, self.path):
-            if len(files) == 1:
-                return self._up_path
-            for file in natsorted(files):
-                video_file = ospath.join(dirpath, file)
-                if (await get_document_type(video_file))[0]:
-                    self.size += await get_path_size(video_file)
-                    list_files.append(f"file '{video_file}'")
-                    self._files.append(video_file)
-
-        self.outfile = self._up_path
-        if len(list_files) > 1:
-            await self._name_base_dir(self.path)
-            await update_status_message(self.listener.message.chat.id)
-            input_file = ospath.join(self.path, 'input.txt')
-            async with aiopen(input_file, 'w') as f:
-                await f.write('\n'.join(list_files))
-
-            self.outfile = ospath.join(self.path, self.name)
-            cmd = [FFMPEG_NAME, '-ignore_unknown', '-f', 'concat', '-safe', '0', '-i', input_file, '-map', '0', '-c', 'copy', self.outfile, '-y']
-            await self._run_cmd(cmd, 'direct')
-            await clean_target(input_file)
-            if self.is_cancel:
-                return
-
-        return await self._final_path()
-
-    async def _merge_auds(self):
-        # Unchanged from your original
-        main_video = False
-        for dirpath, _, files in await sync_to_async(walk, self.path):
-            if len(files) == 1:
-                return self._up_path
-            for file in natsorted(files):
-                file = ospath.join(dirpath, file)
-                is_video, is_audio, _ = await get_document_type(file)
-                if is_video:
-                    if main_video:
-                        continue
-                    main_video = file
-                if is_audio:
-                    self.size += await get_path_size(file)
-                    self._files.append(file)
-
-        self._files.insert(0, main_video)
-        self.outfile = self._up_path
-        if len(self._files) > 1:
-            _, size = await gather(self._name_base_dir(self.path), get_path_size(main_video))
-            self.size += size
-            await update_status_message(self.listener.message.chat.id)
-            cmd = [FFMPEG_NAME, '-hide_banner', '-ignore_unknown']
-            for i in self._files:
-                cmd.extend(('-i', i))
-            cmd.extend(('-map', '0:v:0?', '-map', '0:a:?'))
-            for j in range(1, len(self._files)):
-                cmd.extend(('-map', f'{j}:a'))
-
-            self.outfile = ospath.join(self.path, self.name)
-            streams = (await get_metavideo(main_video))[0]
-            audio_track = len([1+i for i in range(len(streams)) if streams[i]['codec_type'] == 'audio'])
-            cmd.extend((f'-disposition:s:a:{audio_track if audio_track == 0 else audio_track+1}', 'default', '-map', '0:s:?', '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'copy', self.outfile, '-y'))
-            await self._run_cmd(cmd, 'direct')
-            if self.is_cancel:
-                return
-
-        return await self._final_path()
-
-    async def _merge_subs(self, **kwargs):
-        # Unchanged from your original
-        main_video = False
-        for dirpath, _, files in await sync_to_async(walk, self.path):
-            if len(files) == 1:
-                return self._up_path
-            for file in natsorted(files):
-                file = ospath.join(dirpath, file)
-                is_video, is_sub = (await get_document_type(file))[0], file.endswith(('.ass', '.srt', '.vtt'))
-                if is_video:
-                    if main_video:
-                        continue
-                    main_video = file
-                if is_sub:
-                    self.size += await get_path_size(file)
-                    self._files.append(file)
-
-        self._files.insert(0, main_video)
-        self.outfile = self._up_path
-        if len(self._files) > 1:
-            _, size = await gather(self._name_base_dir(self.path), get_path_size(main_video))
-            self.size += size
-            cmd = [FFMPEG_NAME, '-hide_banner', '-ignore_unknown', '-y']
-            self.outfile, status = ospath.join(self.path, self.name), 'direct'
-            if kwargs.get('hardsub'):
-                self.path, status = self._files[0], 'prog'
-                cmd.extend(('-i', self.path, '-vf'))
-                fontname = kwargs.get('fontname', '').replace('_', ' ') or config_dict['HARDSUB_FONT_NAME']
-                fontsize = f',FontSize={fontsize}' if (fontsize := kwargs.get('fontsize') or config_dict['HARDSUB_FONT_SIZE']) else ''
-                fontcolour = f',PrimaryColour=&H{kwargs["fontcolour"]}' if kwargs.get('fontcolour') else ''
-                boldstyle = ',Bold=1' if kwargs.get('boldstyle') else ''
-                quality = f',scale={self._qual[kwargs["quality"]]}:-2' if kwargs.get('quality') else ''
-
-                cmd.append(f"subtitles='{self._files[1]}':force_style='FontName={fontname},Shadow=1.5{fontsize}{fontcolour}{boldstyle}'{quality},unsharp,eq=contrast=1.07")
-
-                if config_dict['VIDTOOLS_FAST_MODE']:
-                    cmd.extend(('-preset', config_dict['LIB264_PRESET'], '-c:v', 'libx264', '-crf', '24'))
-                    extra = ['-map', '0:a:?', '-c:a', 'copy']
-                else:
-                    cmd.extend(('-preset', config_dict['LIB265_PRESET'], '-c:v', 'libx265', '-pix_fmt', 'yuv420p10le', '-crf', '24',
-                                '-profile:v', 'main10', '-x265-params', 'no-info=1', '-bsf:v', 'filter_units=remove_types=6'))
-                    extra = ['-c:a', 'aac', '-b:a', '160k', '-map', '0:1']
-                cmd.extend(['-map', '0:v:0?', '-map', '-0:s'] + extra + [self.outfile])
-            else:
-                for i in self._files:
-                    cmd.extend(('-i', i))
-                cmd.extend(('-map', '0:v:0?', '-map', '0:a:?', '-map', '0:s:?'))
-                for j in range(1, (len(self._files))):
-                    cmd.extend(('-map', f'{j}:s'))
-                cmd.extend(('-c:v', 'copy', '-c:a', 'copy', '-c:s', 'srt', self.outfile))
-            await self._run_cmd(cmd, status)
             if self.is_cancel:
                 return
 
