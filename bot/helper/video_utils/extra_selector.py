@@ -31,11 +31,14 @@ class ExtraSelect:
 
     @new_thread
     async def _event_handler(self):
+        LOGGER.info(f"Starting ExtraSelect event handler for {self.executor.mode}")
         pfunc = partial(cb_extra, obj=self)
         handler = self._listener.client.add_handler(CallbackQueryHandler(pfunc, filters=regex('^extra') & user(self._listener.user_id)), group=-1)
         try:
             await wait_for(self.event.wait(), timeout=180)
+            LOGGER.info(f"ExtraSelect event completed for {self.executor.mode}")
         except TimeoutError:
+            LOGGER.warning(f"ExtraSelect timeout for {self.executor.mode}")
             self.event.set()
             self.is_cancel = True
             await self._cleanup()
@@ -50,6 +53,7 @@ class ExtraSelect:
     async def _cleanup(self):
         """Clean up any temporary data or state for this task."""
         async with data_lock:
+            LOGGER.info(f"Cleaning up ExtraSelect for {self.executor.mode}")
             self.executor.data.clear()
             self.executor.is_cancel = True
             self.executor.event.set()
@@ -57,8 +61,10 @@ class ExtraSelect:
     async def update_message(self, text: str, buttons):
         try:
             if not self._reply:
+                LOGGER.info(f"Sending initial ExtraSelect message for {self.executor.mode}")
                 self._reply = await sendMessage(text, self._listener.message, buttons)
             else:
+                LOGGER.info(f"Updating ExtraSelect message for {self.executor.mode}")
                 await editMessage(text, self._reply, buttons)
         except Exception as e:
             LOGGER.error(f"Failed to update message: {e}")
@@ -74,6 +80,7 @@ class ExtraSelect:
         async with data_lock:
             buttons = ButtonMaker()
             if not self.executor.data:
+                LOGGER.info(f"Initializing stream data for {mode}")
                 self.executor.data = {'streams': {}, 'streams_to_remove': [], 'sdata': []}
                 if isinstance(streams, tuple):
                     streams, _ = streams
@@ -159,6 +166,7 @@ class ExtraSelect:
                     buttons.button_data('Next', f'extra {mode} next', 'footer')
 
             text += f'\n\n<i>Time Out: {get_readable_time(180 - (time() - self._time))}</i>'
+            LOGGER.info(f"Prepared streams_select text for {mode}: {text[:100]}...")
             return text, buttons.build_menu(2)
 
     async def merge_rmaudio_select(self, streams):
@@ -263,6 +271,7 @@ class ExtraSelect:
             await self.update_message(text, buttons)
 
     async def get_buttons(self, *args):
+        LOGGER.info(f"Starting get_buttons for mode {self.executor.mode} with args: {args}")
         future = self._event_handler()
         try:
             if self.executor.mode == 'merge_rmaudio':
@@ -281,7 +290,7 @@ class ExtraSelect:
                 await self.extract_select(*args)
             await wrap_future(future)
         except Exception as e:
-            LOGGER.error(f"Error in get_buttons: {e}")
+            LOGGER.error(f"Error in get_buttons: {e}", exc_info=True)
             await self._cleanup()
         finally:
             if self._reply:
@@ -290,19 +299,26 @@ class ExtraSelect:
             if self.is_cancel:
                 self._listener.suproc = 'cancelled'
                 await self._listener.onUploadError(f'{VID_MODE[self.executor.mode]} stopped by user!')
+            LOGGER.info(f"get_buttons completed for {self.executor.mode}, is_cancel: {self.is_cancel}")
 
 async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
     data = query.data.split()
+    if len(data) < 2:
+        await query.answer("Invalid callback data!", show_alert=True)
+        return
     mode = data[1]
     await query.answer()
+    LOGGER.info(f"Received callback: {query.data}")
 
     async with data_lock:
         if data[2] == 'cancel':
+            LOGGER.info(f"Cancel triggered for {mode}")
             obj.is_cancel = obj.executor.is_cancel = True
             await obj._cleanup()
             obj.event.set()
         elif data[2] in ['prev', 'next']:
             obj.stream_page[mode] = max(0, obj.stream_page.get(mode, 0) + (1 if data[2] == 'next' else -1))
+            LOGGER.info(f"Page navigation: {data[2]} for {mode}, new page: {obj.stream_page[mode]}")
             if mode == 'merge_rmaudio':
                 await obj.merge_rmaudio_select(None)
             elif mode == 'merge_preremove_audio':
@@ -312,20 +328,24 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             elif mode == 'extract':
                 await obj.extract_select(obj.executor.data.get('streams', []))
         elif data[2] == 'reset':
+            LOGGER.info(f"Resetting selections for {mode}")
             for index in obj.executor.data.get('streams_to_remove', []) + obj.executor.data.get('sdata', []):
                 obj.executor.data['streams'][index]['info'] = obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
             obj.executor.data['streams_to_remove'] = []
             obj.executor.data['sdata'] = []
             await obj.update_message(*(await obj.streams_select(None, mode)))
         elif data[2] == 'continue':
+            LOGGER.info(f"Continue triggered for {mode}")
             obj.event.set()
         elif mode == 'merge_rmaudio':
             if data[2] == 'all':
+                LOGGER.info(f"Selecting all streams to remove for {mode}")
                 obj.executor.data['streams_to_remove'] = list(obj.executor.data['streams'].keys())
                 for index in obj.executor.data['streams_to_remove']:
                     obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info'].replace('🔵 ', '')}"
                 await obj.merge_rmaudio_select(None)
             elif data[2] == 'reverse':
+                LOGGER.info(f"Reversing selections for {mode}")
                 all_streams = list(obj.executor.data['streams'].keys())
                 obj.executor.data['streams_to_remove'] = [s for s in all_streams if s not in obj.executor.data['streams_to_remove']]
                 for index in all_streams:
@@ -338,9 +358,11 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                     if stream_key in streams_to_remove:
                         streams_to_remove.remove(stream_key)
                         obj.executor.data['streams'][stream_key]['info'] = obj.executor.data['streams'][stream_key]['info'].replace('🔵 ', '')
+                        LOGGER.info(f"Deselected stream {stream_key} for {mode}")
                     else:
                         streams_to_remove.append(stream_key)
                         obj.executor.data['streams'][stream_key]['info'] = f"🔵 {obj.executor.data['streams'][stream_key]['info'].replace('🔵 ', '')}"
+                        LOGGER.info(f"Selected stream {stream_key} for {mode}")
                     obj.executor.data['streams_to_remove'] = streams_to_remove
                     await obj.merge_rmaudio_select(None)
                 except (ValueError, KeyError) as e:
@@ -348,11 +370,13 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                     await obj.update_message(f"Error selecting stream {data[2]}. Please try again.", buttons.build_menu(2))
         elif mode == 'merge_preremove_audio':
             if data[2] == 'all':
+                LOGGER.info(f"Selecting all streams to remove for {mode}")
                 obj.executor.data['streams_to_remove'] = list(obj.executor.data['streams'].keys())
                 for index in obj.executor.data['streams_to_remove']:
                     obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info'].replace('🔵 ', '')}"
                 await obj.merge_preremove_audio_select(obj.executor.data.get('streams_per_file', {}))
             elif data[2] == 'reverse':
+                LOGGER.info(f"Reversing selections for {mode}")
                 all_streams = list(obj.executor.data['streams'].keys())
                 obj.executor.data['streams_to_remove'] = [s for s in all_streams if s not in obj.executor.data['streams_to_remove']]
                 for index in all_streams:
@@ -365,9 +389,11 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                     if stream_key in streams_to_remove:
                         streams_to_remove.remove(stream_key)
                         obj.executor.data['streams'][stream_key]['info'] = obj.executor.data['streams'][stream_key]['info'].replace('🔵 ', '')
+                        LOGGER.info(f"Deselected stream {stream_key} for {mode}")
                     else:
                         streams_to_remove.append(stream_key)
                         obj.executor.data['streams'][stream_key]['info'] = f"🔵 {obj.executor.data['streams'][stream_key]['info'].replace('🔵 ', '')}"
+                        LOGGER.info(f"Selected stream {stream_key} for {mode}")
                     obj.executor.data['streams_to_remove'] = streams_to_remove
                     await obj.merge_preremove_audio_select(obj.executor.data.get('streams_per_file', {}))
                 except (ValueError, KeyError) as e:
@@ -376,13 +402,16 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
         elif mode == 'rmstream':
             if data[2] == 'all':
                 if 'audio' in data[3].lower():
+                    LOGGER.info(f"Selecting all audio streams for {mode}")
                     obj.executor.data['sdata'] = [s['index'] for s in obj.executor.data['streams'].values() if s['codec_type'] == 'audio']
                 elif 'subtitle' in data[3].lower():
+                    LOGGER.info(f"Selecting all subtitle streams for {mode}")
                     obj.executor.data['sdata'] = [s['index'] for s in obj.executor.data['streams'].values() if s['codec_type'] == 'subtitle']
                 for index in obj.executor.data['sdata']:
                     obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info'].replace('🔵 ', '')}"
                 await obj.rmstream_select(obj.executor.data['streams'])
             elif data[2] == 'reverse':
+                LOGGER.info(f"Reversing selections for {mode}")
                 all_streams = list(obj.executor.data['streams'].keys())
                 obj.executor.data['sdata'] = [s for s in all_streams if s not in obj.executor.data.get('sdata', [])]
                 for index in all_streams:
@@ -395,9 +424,11 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                     if stream_index in sdata:
                         sdata.remove(stream_index)
                         obj.executor.data['streams'][stream_index]['info'] = obj.executor.data['streams'][stream_index]['info'].replace('🔵 ', '')
+                        LOGGER.info(f"Deselected stream {stream_index} for {mode}")
                     else:
                         sdata.append(stream_index)
                         obj.executor.data['streams'][stream_index]['info'] = f"🔵 {obj.executor.data['streams'][stream_index]['info'].replace('🔵 ', '')}"
+                        LOGGER.info(f"Selected stream {stream_index} for {mode}")
                     obj.executor.data['sdata'] = sdata
                     await obj.rmstream_select(obj.executor.data['streams'])
                 except (ValueError, KeyError) as e:
@@ -406,37 +437,46 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
         elif mode == 'extract':
             if data[2] == 'alt':
                 obj.executor.data['alt_mode'] = not literal_eval(data[3])
+                LOGGER.info(f"Toggled ALT mode to {obj.executor.data['alt_mode']} for {mode}")
                 await obj.extract_select(obj.executor.data.get('streams', []))
             elif data[2] == 'extension':
                 ext_idx = {'video': 2, 'audio': 0, 'subtitle': 1}
                 current_ext = obj.extension[ext_idx.get(data[3], 2)]
                 obj.extension[ext_idx.get(data[3], 2)] = None if current_ext else data[3] if data[3] != 'default' else None
+                LOGGER.info(f"Updated extension for {data[3]} to {obj.extension[ext_idx.get(data[3], 2)]}")
                 await obj.extract_select(obj.executor.data.get('streams', []))
             elif data[2] in ['video', 'audio', 'subtitle']:
                 obj.executor.data['key'] = data[2:]
+                LOGGER.info(f"Extract all selected: {data[2:]}")
                 obj.event.set()
             else:
                 try:
                     stream_key = int(data[2])
                     obj.executor.data['key'] = stream_key
+                    LOGGER.info(f"Extract single stream selected: {stream_key}")
                     obj.event.set()
                 except ValueError:
                     LOGGER.error(f"Invalid stream key for extract: {data[2]}")
         elif mode == 'compress':
             if data[2] != 'cancel':
                 obj.executor.data['audio'] = int(data[2])
+                LOGGER.info(f"Compress audio selected: {data[2]}")
                 obj.event.set()
         elif mode == 'convert':
             if data[2] != 'cancel':
                 obj.executor.data = data[2]
+                LOGGER.info(f"Convert resolution selected: {data[2]}")
                 obj.event.set()
         elif mode == 'subsync':
             if data[2] == 'select':
                 obj.executor.data['final'][obj.status] = {'file': obj.executor.data['list'][obj.status], 'ref': obj.executor.data['list'][int(data[3])]}
+                LOGGER.info(f"Subsync reference selected: {obj.executor.data['list'][int(data[3])]} for {obj.executor.data['list'][obj.status]}")
                 obj.status = ''
                 await obj.subsync_select()
             elif not obj.status and data[2].isdigit():
                 obj.status = int(data[2])
+                LOGGER.info(f"Subsync status set to: {obj.status}")
                 await obj.subsync_select()
             elif obj.status and data[2] == 'continue':
+                LOGGER.info(f"Subsync continue triggered")
                 obj.event.set()
