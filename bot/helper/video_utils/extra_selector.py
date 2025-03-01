@@ -53,13 +53,17 @@ class ExtraSelect:
         resolution = f" ({stream.get('height', '')}p)" if stream.get('codec_type') == 'video' and stream.get('height', '') else ''
         return f"{codec_type} ~ {codec_name} ({lang}){resolution}"
 
-    def streams_select(self, streams: dict=None, mode=None):
+    def streams_select(self, streams, mode=None):
         buttons = ButtonMaker()
         if not self.executor.data:
             self.executor.data.setdefault('streams', {})
-            self.executor.data['streams_to_remove'] = self.executor.data.get('streams_to_remove', [])  # Track all streams for removal
+            if mode in ['merge_rmaudio', 'merge_preremove_audio', 'rmstream']:
+                self.executor.data['streams_to_remove'] = self.executor.data.get('streams_to_remove', [])  # Track all streams for removal
+            elif mode == 'extract':
+                self.executor.data['streams_to_extract'] = self.executor.data.get('streams_to_extract', [])  # Track streams for extraction
             self.executor.data['sdata'] = []  # For rmstream mode
-            if isinstance(streams, (list, tuple)):
+
+            if isinstance(streams, list):  # For single file modes (e.g., merge_rmaudio, rmstream)
                 for stream in streams:
                     if isinstance(stream, dict) and stream.get('codec_type') in ['video', 'audio', 'subtitle']:
                         index = stream['index']
@@ -67,7 +71,7 @@ class ExtraSelect:
                         stream_info = self._format_stream_name(stream)
                         if mode == 'rmstream':
                             selected = index in self.executor.data['sdata']
-                            self.executor.data['streams'][index]['info'] = f"{'🔥 ' if selected else ''}{stream_info}"
+                            self.executor.data['streams'][index]['info'] = f"{'🔵 ' if selected else ''}{stream_info}"
                         else:
                             self.executor.data['streams'][index]['info'] = stream_info
             elif isinstance(streams, dict):  # For merge_preremove_audio with per-file streams
@@ -78,6 +82,18 @@ class ExtraSelect:
                             self.executor.data['streams'][f"{file}_{index}"] = stream
                             stream_info = self._format_stream_name(stream)
                             self.executor.data['streams'][f"{file}_{index}"]['info'] = stream_info
+            elif isinstance(streams, tuple) and len(streams) == 2:  # Handle tuple from get_metavideo
+                stream_list, _ = streams  # Unpack the tuple, use only streams list
+                for stream in stream_list:
+                    if isinstance(stream, dict) and stream.get('codec_type') in ['video', 'audio', 'subtitle']:
+                        index = stream['index']
+                        self.executor.data['streams'][index] = stream
+                        stream_info = self._format_stream_name(stream)
+                        if mode == 'rmstream':
+                            selected = index in self.executor.data['sdata']
+                            self.executor.data['streams'][index]['info'] = f"{'🔵 ' if selected else ''}{stream_info}"
+                        else:
+                            self.executor.data['streams'][index]['info'] = stream_info
 
         mode, ddict = self.executor.mode, self.executor.data
         streams_dict = ddict['streams']
@@ -118,7 +134,7 @@ class ExtraSelect:
                 if ddict.get('sdata'):
                     text += '\n\nStreams to remove:\n'
                     for i, sindex in enumerate(ddict['sdata'], start=1):
-                        text += f"{i}. {ddict['streams'][sindex]['info'].replace('🔥 ', '')}\n"
+                        text += f"{i}. {ddict['streams'][sindex]['info'].replace('🔵 ', '')}\n"
                 buttons.button_data('All Audio', f'extra {mode} audio')
                 buttons.button_data('All Subs', f'extra {mode} subtitle')
             else:
@@ -147,12 +163,16 @@ class ExtraSelect:
         return text, buttons.build_menu(2)
 
     async def merge_rmaudio_select(self, streams):
+        if isinstance(streams, tuple) and len(streams) == 2:  # Handle tuple from get_metavideo
+            streams, _ = streams  # Unpack the tuple, use only streams list
         await self.streams_select(streams, 'merge_rmaudio')
 
     async def merge_preremove_audio_select(self, streams_per_file: dict):
         await self.streams_select(streams_per_file, 'merge_preremove_audio')
 
     async def compress_select(self, streams: dict):
+        if isinstance(streams, tuple) and len(streams) == 2:  # Handle tuple from get_metavideo
+            streams, _ = streams  # Unpack the tuple, use only streams list
         self.executor.data = {}
         buttons = ButtonMaker()
         for stream in streams:
@@ -169,10 +189,14 @@ class ExtraSelect:
         buttons.button_data('Cancel', 'extra cancel')
         await self.update_message(f'{self._listener.tag}, Select available audio or press <b>Continue (no audio)</b>.\n<code>{self.executor.name}</code>', buttons.build_menu(2))
 
-    async def rmstream_select(self, streams: dict):
+    async def rmstream_select(self, streams):
+        if isinstance(streams, tuple) and len(streams) == 2:  # Handle tuple from get_metavideo
+            streams, _ = streams  # Unpack the tuple, use only streams list
         await self.streams_select(streams, 'rmstream')
 
     async def convert_select(self, streams: dict):
+        if isinstance(streams, tuple) and len(streams) == 2:  # Handle tuple from get_metavideo
+            streams, _ = streams  # Unpack the tuple, use only streams list
         buttons = ButtonMaker()
         hvid = '1080p'
         resolution = {'1080p': 'Convert 1080p',
@@ -229,6 +253,8 @@ class ExtraSelect:
         await self.update_message(text, buttons.build_menu(5))
 
     async def extract_select(self, streams: dict):
+        if isinstance(streams, tuple) and len(streams) == 2:  # Handle tuple from get_metavideo
+            streams, _ = streams  # Unpack the tuple, use only streams list
         self.executor.data = {}
         ext = [None, None, 'mkv']
         for stream in streams:
@@ -337,8 +363,8 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                 obj.executor.data['audio_selections'][file] = []
             selections = obj.executor.data['audio_selections'].get(file, [])
             if action == 'all':
-                obj.executor.data['audio_selections'][file] = list(s['index'] for s in obj.executor.data['streams_per_file'][file] 
-                                                                if s['codec_type'] in ['video', 'audio', 'subtitle'])
+                obj.executor.data['audio_selections'][file] = [s['index'] for s in obj.executor.data['streams_per_file'][file] 
+                                                            if s['codec_type'] in ['video', 'audio', 'subtitle']]
             elif action.isdigit():
                 index = int(action)
                 if index in selections:
@@ -371,28 +397,28 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             elif 'subtitle' in data[3].lower():
                 obj.executor.data['sdata'] = [s['index'] for s in obj.executor.data['streams'].values() if s['codec_type'] == 'subtitle']
             for index in obj.executor.data['sdata']:
-                obj.executor.data['streams'][index]['info'] = f"🔥 {obj.executor.data['streams'][index]['info']}"
+                obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info']}"
         elif data[2] == 'continue':
             obj.event.set()
         elif data[2] == 'reset':
             for index in obj.executor.data.get('sdata', []):
-                obj.executor.data['streams'][index]['info'] = obj.executor.data['streams'][index]['info'].replace('🔥 ', '')
+                obj.executor.data['streams'][index]['info'] = obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
             obj.executor.data['sdata'] = []
             await obj.rmstream_select(obj.executor.data['streams'])
         elif data[2] == 'reverse':
             all_streams = [s['index'] for s in obj.executor.data['streams'].values()]
             obj.executor.data['sdata'] = [s for s in all_streams if s not in obj.executor.data.get('sdata', [])]
             for index in all_streams:
-                obj.executor.data['streams'][index]['info'] = f"🔥 {obj.executor.data['streams'][index]['info']}" if index in obj.executor.data['sdata'] else obj.executor.data['streams'][index]['info'].replace('🔥 ', '')
+                obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info']}" if index in obj.executor.data['sdata'] else obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
             await obj.rmstream_select(obj.executor.data['streams'])
         else:
             stream_index = int(data[2])
             if stream_index in obj.executor.data.get('sdata', []):
                 obj.executor.data['sdata'].remove(stream_index)
-                obj.executor.data['streams'][stream_index]['info'] = obj.executor.data['streams'][stream_index]['info'].replace('🔥 ', '')
+                obj.executor.data['streams'][stream_index]['info'] = obj.executor.data['streams'][stream_index]['info'].replace('🔵 ', '')
             else:
                 obj.executor.data['sdata'].append(stream_index)
-                obj.executor.data['streams'][stream_index]['info'] = f"🔥 {obj.executor.data['streams'][stream_index]['info']}"
+                obj.executor.data['streams'][stream_index]['info'] = f"🔵 {obj.executor.data['streams'][stream_index]['info']}"
             await obj.rmstream_select(obj.executor.data['streams'])
     elif mode == 'extract':
         value = data[2]
