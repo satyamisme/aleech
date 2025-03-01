@@ -32,10 +32,11 @@ class ExtraSelect:
 
     @new_thread
     async def _event_handler(self):
-        LOGGER.info(f"Starting ExtraSelect event handler for {self.executor.mode}")
+        LOGGER.info(f"Starting ExtraSelect event handler for {self.executor.mode} (MID: {self.executor.listener.mid})")
         pfunc = partial(cb_extra, obj=self)
-        handler = self._listener.client.add_handler(CallbackQueryHandler(pfunc, filters=regex('^extra') & user(self._listener.user_id)), group=-1)
+        handler = None
         try:
+            handler = self._listener.client.add_handler(CallbackQueryHandler(pfunc, filters=regex('^extra') & user(self._listener.user_id)), group=-1)
             await wait_for(self.event.wait(), timeout=180)
             LOGGER.info(f"ExtraSelect event completed successfully for {self.executor.mode}")
         except TimeoutError:
@@ -47,8 +48,10 @@ class ExtraSelect:
             self.is_cancel = True
             await self._cleanup()
         finally:
-            self._listener.client.remove_handler(*handler)
+            if handler:
+                self._listener.client.remove_handler(*handler)
             self.event.set()
+            LOGGER.info(f"Event handler finished for {self.executor.mode}, event set")
 
     async def _cleanup(self):
         async with data_lock:
@@ -56,6 +59,9 @@ class ExtraSelect:
             self.executor.data.clear()
             self.executor.is_cancel = True
             self.executor.event.set()
+            if self._reply:
+                await deleteMessage(self._reply)
+                self._reply = None
 
     async def update_message(self, text: str, buttons):
         try:
@@ -68,7 +74,7 @@ class ExtraSelect:
             if not self._reply:
                 LOGGER.error(f"Failed to send/update message for {self.executor.mode}")
         except Exception as e:
-            LOGGER.error(f"Failed to update message: {e}")
+            LOGGER.error(f"Failed to update message: {e}", exc_info=True)
 
     def _format_stream_name(self, stream):
         codec_type = stream.get('codec_type', 'unknown').title()
@@ -157,23 +163,34 @@ class ExtraSelect:
                 if page < total_pages - 1:
                     buttons.button_data('Next', f'extra {mode} next', 'footer')
 
-            text += f'\n<i>Time Left: {get_readable_time(180 - (time() - self._time))}</i>'
+            elapsed_time = int(time() - self._time)
+            remaining_time = max(0, 180 - elapsed_time)
+            text += f'\n<i>Time Left: {get_readable_time(remaining_time)}</i>'
             LOGGER.info(f"Prepared streams_select text for {mode}: {text}")
             return text, buttons.build_menu(2)
 
     async def merge_rmaudio_select(self, streams):
         if isinstance(streams, tuple):
             streams, _ = streams
+        if not streams:
+            LOGGER.error(f"No streams provided for merge_rmaudio")
+            return
         text, buttons = await self.streams_select(streams, 'merge_rmaudio')
         await self.update_message(text, buttons)
 
     async def merge_preremove_audio_select(self, streams_per_file: dict):
+        if not streams_per_file:
+            LOGGER.error(f"No streams provided for merge_preremove_audio")
+            return
         text, buttons = await self.streams_select(streams_per_file, 'merge_preremove_audio')
         await self.update_message(text, buttons)
 
     async def compress_select(self, streams: dict):
         if isinstance(streams, tuple):
             streams, _ = streams
+        if not streams:
+            LOGGER.error(f"No streams provided for compress")
+            return
         async with data_lock:
             self.executor.data = {}
             buttons = ButtonMaker()
@@ -185,17 +202,28 @@ class ExtraSelect:
                     buttons.button_data(f'Audio ~ {lang.upper()}', f'extra compress {index}', 'footer')
             buttons.button_data('Continue', 'extra compress 0', 'footer')
             buttons.button_data('Cancel', 'extra cancel', 'footer')
-            await self.update_message(f'{self._listener.tag}, Select audio or press <b>Continue (no audio)</b>.\n<code>{self.executor.name}</code>', buttons.build_menu(2))
+            elapsed_time = int(time() - self._time)
+            remaining_time = max(0, 180 - elapsed_time)
+            text = (f'{self._listener.tag}, Select audio or press <b>Continue (no audio)</b>.\n'
+                    f'<code>{self.executor.name}</code>\n'
+                    f'<i>Time Left: {get_readable_time(remaining_time)}</i>')
+            await self.update_message(text, buttons.build_menu(2))
 
     async def rmstream_select(self, streams):
         if isinstance(streams, tuple):
             streams, _ = streams
+        if not streams:
+            LOGGER.error(f"No streams provided for rmstream")
+            return
         text, buttons = await self.streams_select(streams, 'rmstream')
         await self.update_message(text, buttons)
 
     async def convert_select(self, streams: dict):
         if isinstance(streams, tuple):
             streams, _ = streams
+        if not streams:
+            LOGGER.error(f"No streams provided for convert")
+            return
         async with data_lock:
             buttons = ButtonMaker()
             hvid = '1080p'
@@ -210,7 +238,12 @@ class ExtraSelect:
             for key in keys[keys.index(hvid)+1:]:
                 buttons.button_data(resolution[key], f'extra convert {key}', 'footer')
             buttons.button_data('Cancel', 'extra cancel', 'footer')
-            await self.update_message(f'{self._listener.tag}, Select resolution to convert.\n<code>{self.executor.name}</code>', buttons.build_menu(2))
+            elapsed_time = int(time() - self._time)
+            remaining_time = max(0, 180 - elapsed_time)
+            text = (f'{self._listener.tag}, Select resolution to convert.\n'
+                    f'<code>{self.executor.name}</code>\n'
+                    f'<i>Time Left: {get_readable_time(remaining_time)}</i>')
+            await self.update_message(text, buttons.build_menu(2))
 
     async def subsync_select(self):
         buttons = ButtonMaker()
@@ -218,20 +251,35 @@ class ExtraSelect:
         if not self.status:
             async with data_lock:
                 self.executor.data['list'] = {}
-                for position, file in enumerate(sorted(await listdir(self.executor.path)), 1):
+                try:
+                    files = await listdir(self.executor.path)
+                except Exception as e:
+                    LOGGER.error(f"Error listing directory for subsync: {e}")
+                    await self._cleanup()
+                    return self.executor._up_path
+                for position, file in enumerate(sorted(files), 1):
                     file_path = os.path.join(self.executor.path, file)
                     if (await exc.get_document_type(file_path))[0] or file.endswith(('.srt', '.ass')):
                         self.executor.data['list'][position] = file
                 if not self.executor.data['list']:
+                    LOGGER.warning("No files found for subsync")
                     await self._cleanup()
                     return self.executor._up_path
                 self.executor.data['final'] = {}
                 self._start_handler()
-                await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
-                if self.is_cancel or not self.executor.data.get('final'):
+                try:
+                    await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
+                    if self.is_cancel or not self.executor.data.get('final'):
+                        LOGGER.info(f"Subsync cancelled or no final selections: cancel={self.is_cancel}")
+                        await self._cleanup()
+                        return self.executor._up_path
+                    LOGGER.info(f"Subsync selections completed: {self.executor.data['final']}")
+                    return self.executor._up_path
+                except TimeoutError:
+                    LOGGER.error("Timeout in subsync selection")
+                    self.is_cancel = True
                     await self._cleanup()
                     return self.executor._up_path
-                return self.executor._up_path
         else:
             file = self.executor.data['list'][self.status]
             text = f'Current: <b>{file}</b>\n'
@@ -244,11 +292,17 @@ class ExtraSelect:
                     text += f'{index}. {file}\n'
                     buttons.button_data(str(index), f'extra subsync select {position}', 'footer')
                     index += 1
+            elapsed_time = int(time() - self._time)
+            remaining_time = max(0, 180 - elapsed_time)
+            text += f'\n<i>Time Left: {get_readable_time(remaining_time)}</i>'
             await self.update_message(text, buttons.build_menu(5))
 
     async def extract_select(self, streams: dict):
         if isinstance(streams, tuple):
             streams, _ = streams
+        if not streams:
+            LOGGER.error(f"No streams provided for extract")
+            return
         async with data_lock:
             self.executor.data = {}
             ext = [None, None, 'mkv']
@@ -268,6 +322,7 @@ class ExtraSelect:
         try:
             if not args or not args[0]:
                 LOGGER.error(f"No valid streams passed to get_buttons for {self.executor.mode}")
+                await self._cleanup()
                 return
             if self.executor.mode == 'merge_rmaudio':
                 await self.merge_rmaudio_select(*args)
@@ -286,11 +341,12 @@ class ExtraSelect:
             await wrap_future(future)
             LOGGER.info(f"get_buttons finished awaiting event for {self.executor.mode}, data: {self.executor.data}")
         except Exception as e:
-            LOGGER.error(f"Error in get_buttons: {e}", exc_info=True)
+            LOGGER.error(f"Error in get_buttons for {self.executor.mode}: {e}", exc_info=True)
             await self._cleanup()
         finally:
             if self._reply:
                 await deleteMessage(self._reply)
+                LOGGER.info(f"Deleted reply message for {self.executor.mode}")
             self.executor.event.set()
             if self.is_cancel:
                 self._listener.suproc = 'cancelled'
@@ -301,6 +357,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
     data = query.data.split()
     if len(data) < 2:
         await query.answer("Invalid callback data!", show_alert=True)
+        LOGGER.warning(f"Invalid callback data: {query.data}")
         return
     mode = data[1]
     await query.answer()
@@ -326,7 +383,8 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
         elif data[2] == 'reset':
             LOGGER.info(f"Resetting selections for {mode}")
             for index in obj.executor.data.get('streams_to_remove', []) + obj.executor.data.get('sdata', []):
-                obj.executor.data['streams'][index]['info'] = obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
+                if index in obj.executor.data['streams']:
+                    obj.executor.data['streams'][index]['info'] = obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
             obj.executor.data['streams_to_remove'] = []
             obj.executor.data['sdata'] = []
             await obj.update_message(*(await obj.streams_select(None, mode)))
@@ -334,6 +392,9 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             LOGGER.info(f"Continue triggered for {mode}, setting event with data: {obj.executor.data}")
             obj.event.set()
             await asyncio.sleep(1)
+            if not obj.event.is_set():
+                LOGGER.error(f"Event failed to set for {mode}, forcing set")
+                obj.event.set()
             LOGGER.info(f"Event set for {mode}, selections: {obj.executor.data.get('streams_to_remove', [])}")
         elif mode == 'merge_rmaudio':
             if data[2] == 'all':
@@ -460,17 +521,30 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                 obj.executor.data['audio'] = int(data[2])
                 LOGGER.info(f"Compress audio selected: {data[2]}")
                 obj.event.set()
+            else:
+                LOGGER.info(f"Cancel triggered in compress mode")
+                obj.is_cancel = obj.executor.is_cancel = True
+                await obj._cleanup()
+                obj.event.set()
         elif mode == 'convert':
             if data[2] != 'cancel':
                 obj.executor.data = data[2]
                 LOGGER.info(f"Convert resolution selected: {data[2]}")
                 obj.event.set()
+            else:
+                LOGGER.info(f"Cancel triggered in convert mode")
+                obj.is_cancel = obj.executor.is_cancel = True
+                await obj._cleanup()
+                obj.event.set()
         elif mode == 'subsync':
             if data[2] == 'select':
-                obj.executor.data['final'][obj.status] = {'file': obj.executor.data['list'][obj.status], 'ref': obj.executor.data['list'][int(data[3])]}
-                LOGGER.info(f"Subsync reference selected: {obj.executor.data['list'][int(data[3])]} for {obj.executor.data['list'][obj.status]}")
-                obj.status = ''
-                await obj.subsync_select()
+                try:
+                    obj.executor.data['final'][obj.status] = {'file': obj.executor.data['list'][obj.status], 'ref': obj.executor.data['list'][int(data[3])]}
+                    LOGGER.info(f"Subsync reference selected: {obj.executor.data['list'][int(data[3])]} for {obj.executor.data['list'][obj.status]}")
+                    obj.status = ''
+                    await obj.subsync_select()
+                except (KeyError, ValueError) as e:
+                    LOGGER.error(f"Error in subsync select: {e}")
             elif not obj.status and data[2].isdigit():
                 obj.status = int(data[2])
                 LOGGER.info(f"Subsync status set to: {obj.status}")

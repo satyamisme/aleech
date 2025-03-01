@@ -5,7 +5,7 @@ from asyncio import Event, wait_for, wrap_future, gather
 from functools import partial
 from os import path as ospath
 from PIL import Image
-from pyrogram.filters import regex, user, text, photo, document
+from pyrogram.filters import regex, user
 from pyrogram.handlers import MessageHandler, CallbackQueryHandler
 from pyrogram.types import Message, CallbackQuery
 from re import match as re_match
@@ -34,13 +34,15 @@ class SelectMode:
         self.event = Event()
         self.message_event = Event()
         self.is_cancelled = False
+        LOGGER.info(f"Initialized SelectMode for user {self.listener.user_id}, isLink: {isLink}")
 
     @new_thread
     async def _event_handler(self):
         LOGGER.info(f"Starting SelectMode event handler for user {self.listener.user_id}")
         pfunc = partial(cb_vidtools, obj=self)
-        handler = self.listener.client.add_handler(CallbackQueryHandler(pfunc, filters=regex('^vidtool') & user(self.listener.user_id)), group=-1)
+        handler = None
         try:
+            handler = self.listener.client.add_handler(CallbackQueryHandler(pfunc, filters=regex('^vidtool') & user(self.listener.user_id)), group=-1)
             await wait_for(self.event.wait(), timeout=180)
             LOGGER.info(f"SelectMode event completed for user {self.listener.user_id}")
         except TimeoutError:
@@ -53,14 +55,17 @@ class SelectMode:
             self.is_cancelled = True
             self.event.set()
         finally:
-            self.listener.client.remove_handler(*handler)
+            if handler:
+                self.listener.client.remove_handler(*handler)
+            LOGGER.info(f"Event handler finished for user {self.listener.user_id}")
 
     @new_thread
     async def message_event_handler(self, mode=''):
-        LOGGER.info(f"Starting message event handler for mode {mode}")
+        LOGGER.info(f"Starting message event handler for mode {mode}, user {self.listener.user_id}")
         pfunc = partial(message_handler, obj=self, is_sub=mode == 'subfile')
-        handler = self.listener.client.add_handler(MessageHandler(pfunc, user(self.listener.user_id)), group=1)
+        handler = None
         try:
+            handler = self.listener.client.add_handler(MessageHandler(pfunc, user(self.listener.user_id)), group=1)
             await wait_for(self.message_event.wait(), timeout=60)
             LOGGER.info(f"Message event completed for mode {mode}")
         except TimeoutError:
@@ -70,19 +75,21 @@ class SelectMode:
             LOGGER.error(f"Message event handler error: {e}", exc_info=True)
             self.message_event.set()
         finally:
-            self.listener.client.remove_handler(*handler)
+            if handler:
+                self.listener.client.remove_handler(*handler)
             self.message_event.clear()
+            LOGGER.info(f"Message event handler finished for mode {mode}")
 
     async def _send_message(self, text: str, buttons):
         try:
             if not self._reply:
                 self._reply = await sendMessage(text, self.listener.message, buttons)
-                LOGGER.info(f"Sent initial message for mode selection")
+                LOGGER.info(f"Sent initial message for mode selection to user {self.listener.user_id}")
             else:
                 await editMessage(text, self._reply, buttons)
-                LOGGER.info(f"Updated message for mode selection")
+                LOGGER.info(f"Updated message for mode selection for user {self.listener.user_id}")
         except Exception as e:
-            LOGGER.error(f"Failed to send message: {e}")
+            LOGGER.error(f"Failed to send message: {e}", exc_info=True)
 
     def _captions(self, mode: str=None):
         msg = (f'<b>VIDEOS TOOL SETTINGS</b>\n'
@@ -127,7 +134,9 @@ class SelectMode:
                         '480p: <b>11-16</b>')
             case 'trim':
                 msg += '\n\n<i>Send valid trim duration <b>hh:mm:ss hh:mm:ss</b></i>'
-        msg += f'\n\n<i>Time Out: {get_readable_time(180 - (time() - self._time))}</i>'
+        elapsed_time = int(time() - self._time)
+        remaining_time = max(0, 180 - elapsed_time)
+        msg += f'\n\n<i>Time Out: {get_readable_time(remaining_time)}</i>'
         return msg
 
     async def list_buttons(self, mode: str=''):
@@ -279,7 +288,7 @@ async def cb_vidtools(_, query: CallbackQuery, obj: SelectMode):
         await query.answer("Invalid callback data!", show_alert=True)
         LOGGER.warning(f"Invalid callback data from user {obj.listener.user_id}: {query.data}")
         return
-    if data[1] in config_dict['DISABLE_VIDTOOLS']:
+    if data[1] in config_dict.get('DISABLE_VIDTOOLS', []):
         await query.answer(f'{VID_MODE[data[1]]} has been disabled!', show_alert=True)
         LOGGER.info(f"Disabled mode {data[1]} attempted by user {obj.listener.user_id}")
         return
