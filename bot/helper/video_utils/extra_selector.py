@@ -117,7 +117,7 @@ class ExtraSelect:
                     is_selected = (key in ddict.get('streams_to_remove', []) if mode in ['merge_rmaudio', 'merge_preremove_audio'] 
                                  else key in ddict.get('sdata', []) if mode == 'rmstream' else False)
                     displayed_info = f"🔵 {value['info']}" if is_selected else value['info']
-                    buttons.button_data(displayed_info, f'extra {mode} {key}')
+                    buttons.button_data(displayed_info, f'extra {mode} {key}', 'footer')  # Ensure buttons are in footer for visibility
             else:
                 text += '\nNo streams available for selection.'
 
@@ -129,7 +129,7 @@ class ExtraSelect:
                          f"<b>└ </b>Subtitle Format: <b>{subext.upper() if subext else 'SRT'}</b>")
                 for ext in self.extension:
                     buttons.button_data(ext.upper() if ext else 'DEFAULT', f'extra {mode} extension {ext or "default"}', 'header')
-                buttons.button_data('Extract All', f'extra {mode} video audio subtitle')
+                buttons.button_data('Extract All', f'extra {mode} video audio subtitle', 'footer')
 
             if mode in ['merge_rmaudio', 'merge_preremove_audio', 'rmstream']:
                 if mode == 'rmstream' and ddict.get('sdata'):
@@ -140,12 +140,12 @@ class ExtraSelect:
                     text += '\n\nStreams to remove:\n'
                     for stream_key in ddict['streams_to_remove']:
                         text += f"- {ddict['streams'][stream_key]['info'].replace('🔵 ', '')}\n"
-                buttons.button_data('Remove All', f'extra {mode} all')
+                buttons.button_data('Remove All', f'extra {mode} all', 'footer')
                 buttons.button_data('Reset', f'extra {mode} reset', 'header')
                 buttons.button_data('Reverse', f'extra {mode} reverse', 'header')
                 if mode == 'rmstream':
-                    buttons.button_data('All Audio', f'extra {mode} audio')
-                    buttons.button_data('All Subs', f'extra {mode} subtitle')
+                    buttons.button_data('All Audio', f'extra {mode} audio', 'footer')
+                    buttons.button_data('All Subs', f'extra {mode} subtitle', 'footer')
                     buttons.button_data('Continue', f'extra {mode} continue', 'footer')
                 else:
                     has_selections = bool(ddict.get('streams_to_remove', []))
@@ -183,9 +183,9 @@ class ExtraSelect:
                 if codec_type == 'video' and 'video' not in self.executor.data:
                     self.executor.data['video'] = index
                 if codec_type == 'audio':
-                    buttons.button_data(f'Audio ~ {lang.upper()}', f'extra compress {index}')
-            buttons.button_data('Continue', 'extra compress 0')
-            buttons.button_data('Cancel', 'extra cancel')
+                    buttons.button_data(f'Audio ~ {lang.upper()}', f'extra compress {index}', 'footer')
+            buttons.button_data('Continue', 'extra compress 0', 'footer')
+            buttons.button_data('Cancel', 'extra cancel', 'footer')
             await self.update_message(f'{self._listener.tag}, Select audio or press <b>Continue (no audio)</b>.\n<code>{self.executor.name}</code>', buttons.build_menu(2))
 
     async def rmstream_select(self, streams):
@@ -209,7 +209,7 @@ class ExtraSelect:
                     break
             keys = list(resolution)
             for key in keys[keys.index(hvid)+1:]:
-                buttons.button_data(resolution[key], f'extra convert {key}')
+                buttons.button_data(resolution[key], f'extra convert {key}', 'footer')
             buttons.button_data('Cancel', 'extra cancel', 'footer')
             await self.update_message(f'{self._listener.tag}, Select resolution to convert.\n<code>{self.executor.name}</code>', buttons.build_menu(2))
 
@@ -243,7 +243,7 @@ class ExtraSelect:
             for position, file in self.executor.data['list'].items():
                 if position != self.status and file not in [v['file'] for v in self.executor.data['final'].values()]:
                     text += f'{index}. {file}\n'
-                    buttons.button_data(str(index), f'extra subsync select {position}')
+                    buttons.button_data(str(index), f'extra subsync select {position}', 'footer')
                     index += 1
             await self.update_message(text, buttons.build_menu(5))
 
@@ -317,6 +317,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                 obj.executor.data['streams_to_remove'] = list(obj.executor.data['streams'].keys())
                 for index in obj.executor.data['streams_to_remove']:
                     obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info']}"
+                await obj.merge_rmaudio_select(None)  # Refresh UI after selection
                 obj.event.set()
             elif data[2] == 'continue':
                 if not obj.executor.data.get('streams_to_remove', []):
@@ -326,13 +327,13 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                 for index in obj.executor.data.get('streams_to_remove', []):
                     obj.executor.data['streams'][index]['info'] = obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
                 obj.executor.data['streams_to_remove'] = []
-                await obj.merge_rmaudio_select(None)
+                await obj.merge_rmaudio_select(None)  # Refresh UI after reset
             elif data[2] == 'reverse':
                 all_streams = list(obj.executor.data['streams'].keys())
                 obj.executor.data['streams_to_remove'] = [s for s in all_streams if s not in obj.executor.data['streams_to_remove']]
                 for index in obj.executor.data['streams']:
                     obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info']}" if index in obj.executor.data['streams_to_remove'] else obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
-                await obj.merge_rmaudio_select(None)
+                await obj.merge_rmaudio_select(None)  # Refresh UI after reverse
             else:
                 try:
                     stream_key = int(data[2])
@@ -344,7 +345,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                         streams_to_remove.append(stream_key)
                         obj.executor.data['streams'][stream_key]['info'] = f"🔵 {obj.executor.data['streams'][stream_key]['info']}"
                     obj.executor.data['streams_to_remove'] = streams_to_remove
-                    await obj.merge_rmaudio_select(None)
+                    await obj.merge_rmaudio_select(None)  # Refresh UI after individual selection
                 except (ValueError, KeyError) as e:
                     LOGGER.error(f"Invalid stream key or data error: {e}")
                     await obj.update_message(f"Error selecting stream {data[2]}. Please try again.", buttons.build_menu(2))
