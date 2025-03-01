@@ -61,41 +61,40 @@ class SelectMode:
             self.message_event.clear()
 
     async def _send_message(self, text: str, buttons):
-        if not self._reply:
-            self._reply = await sendMessage(text, self.listener.message, buttons)
-        else:
-            await editMessage(text, self._reply, buttons)
+        try:
+            if not self._reply:
+                self._reply = await sendMessage(text, self.listener.message, buttons)
+            else:
+                await editMessage(text, self._reply, buttons)
+        except Exception as e:
+            LOGGER.error(f"Failed to send message: {e}")
 
     def _captions(self, mode: str=None):
-        msg = ('<b>VIDEOS TOOL SETTINGS</b>'
-               f'\nMode: <b>{vidmode}</b>' if (vidmode := VID_MODE.get(self.mode)) else ''
-               f'\nName: <b>{self.newname or "Default"}</b>'
-               f'\nTrim Duration: <b>{list(self.extra_data.values())}</b>' if self.extra_data and self.mode == 'trim' else '')
+        msg = (f'<b>VIDEOS TOOL SETTINGS</b>\n'
+               f'Mode: <b>{VID_MODE.get(self.mode, "None")}</b>\n'
+               f'Name: <b>{self.newname or "Default"}</b>')
+        if self.extra_data and self.mode == 'trim':
+            msg += f'\nTrim Duration: <b>{list(self.extra_data.values())}</b>'
         if self.mode in ('vid_sub', 'watermark'):
             hardsub = self.extra_data.get('hardsub')
             msg += f"\nHardsub Mode: <b>{'Enable' if hardsub else 'Disable'}</b>"
             if hardsub:
                 msg += f"\nBold Style: <b>{'Enable' if self.extra_data.get('boldstyle') else 'Disable'}</b>"
-                if fontname := self.extra_data.get('fontname') or config_dict['HARDSUB_FONT_NAME']:
-                    msg += f'\nFont Name: <b>{fontname.replace("_", " ")}</b>'
-                if fontsize := self.extra_data.get('fontsize') or config_dict['HARDSUB_FONT_SIZE']:
-                    msg += f'\nFont Size: <b>{fontsize}</b>'
+                fontname = self.extra_data.get('fontname') or config_dict['HARDSUB_FONT_NAME']
+                msg += f'\nFont Name: <b>{fontname.replace("_", " ")}</b>'
+                fontsize = self.extra_data.get('fontsize') or config_dict['HARDSUB_FONT_SIZE']
+                msg += f'\nFont Size: <b>{fontsize}</b>'
                 if fontcolour := self.extra_data.get('fontcolour'):
                     msg += f'\nFont Colour: <b>{fontcolour}</b>'
         if quality := self.extra_data.get('quality'):
             msg += f'\nQuality: <b>{quality}</b>'
         if self.mode == 'watermark' and (wmsize := self.extra_data.get('wmsize')):
             msg += f'\nWM Size: <b>{wmsize}</b>'
-            if wmsize and (wmposition := self.extra_data.get('wmposition')):
-                pos_dict = {'5:5': 'Top Left',
-                            'main_w-overlay_w-5:5': 'Top Right',
-                            '5:main_h-overlay_h': 'Bottom Left',
-                            'w-overlay_w-5:main_h-overlay_h-5': 'Bottom Right'}
+            if wmposition := self.extra_data.get('wmposition'):
+                pos_dict = {'5:5': 'Top Left', 'main_w-overlay_w-5:5': 'Top Right', '5:main_h-overlay_h': 'Bottom Left', 'w-overlay_w-5:main_h-overlay_h-5': 'Bottom Right'}
                 msg += f'\nWM Position: <b>{pos_dict[wmposition]}</b>'
             if popupwm := self.extra_data.get('popupwm'):
                 msg += f'\nDisplay: <b>{popupwm}x/20s</b>'
-        if self.mode == 'subsync' and (typee := self.extra_data.get('type')):
-            msg += f'\nSync Mode: <b>{typee.lstrip("sync_").title()}</b>'
         match mode:
             case 'rename':
                 msg += '\n\n<i>Send valid name with extension...</i>'
@@ -113,7 +112,7 @@ class SelectMode:
                         '480p: <b>11-16</b>')
             case 'trim':
                 msg += '\n\n<i>Send valid trim duration <b>hh:mm:ss hh:mm:ss</b></i>'
-        msg += f'\n\n<i>Time Out: {get_readable_time(180 - (time()-self._time))}</i>'
+        msg += f'\n\n<i>Time Out: {get_readable_time(180 - (time() - self._time))}</i>'
         return msg
 
     async def list_buttons(self, mode: str=''):
@@ -129,10 +128,9 @@ class SelectMode:
             if self.mode in ('vid_sub', 'watermark') and await CustomFilters.sudo('', self.listener.message):
                 hardsub = self.extra_data.get('hardsub')
                 buttons.button_data(f"{'🔥 ' if hardsub else ''}Hardsub", 'vidtool hardsub', 'header')
-                if hardsub:
-                    if self.mode == 'watermark':
-                        buttons.button_data(f"{'🔥 ' if await aiopath.exists(self.extra_data.get('subfile', '')) else ''}Sub File", 'vidtool subfile', 'header')
-                    buttons.button_data('Font Style', 'vidtool fontstyle', 'header')
+                if hardsub and self.mode == 'watermark':
+                    buttons.button_data(f"{'🔥 ' if await aiopath.exists(self.extra_data.get('subfile', '')) else ''}Sub File", 'vidtool subfile', 'header')
+                buttons.button_data('Font Style', 'vidtool fontstyle', 'header')
             if self.mode in ('compress', 'watermark') or self.extra_data.get('hardsub'):
                 buttons.button_data('Quality', 'vidtool quality', 'header')
             if self.mode == 'watermark':
@@ -154,37 +152,41 @@ class SelectMode:
                     buttons.button_data('Auto', 'vidtool sync_auto')
                 case 'quality':
                     bnum = 3
-                    [buttons.button_data(f"{'🔥 ' if self.extra_data.get('quality') == key else ''}{key}", f'vidtool quality {key}') for key in ['1080p', '720p', '540p', '480p', '360p']]
+                    for key in ['1080p', '720p', '540p', '480p', '360p']:
+                        buttons.button_data(f"{'🔥 ' if self.extra_data.get('quality') == key else ''}{key}", f'vidtool quality {key}')
                     buttons.button_data('<<', 'vidtool back', 'footer')
                     buttons.button_data('Done', 'vidtool done', 'footer')
                 case 'popupwm':
                     bnum, popupwm = 5, self.extra_data.get('popupwm', 0)
                     if popupwm:
                         buttons.button_data('Reset', 'vidtool popupwm 0', 'header')
-                    [buttons.button_data(f"{'🔥 ' if popupwm == key else ''}{key}", f'vidtool popupwm {key}') for key in range(2, 21, 2)]
+                    for key in range(2, 21, 2):
+                        buttons.button_data(f"{'🔥 ' if popupwm == key else ''}{key}", f'vidtool popupwm {key}')
                     buttons.button_data('<<', 'vidtool back', 'footer')
                     buttons.button_data('Done', 'vidtool done', 'footer')
                 case 'wmsize':
                     bnum = 3
-                    [buttons.button_data(str(btn), f'vidtool wmsize {btn}') for btn in [5, 10, 15, 20, 25, 30]]
+                    for btn in [5, 10, 15, 20, 25, 30]:
+                        buttons.button_data(str(btn), f'vidtool wmsize {btn}')
                 case 'fontstyle':
                     bnum = 3
                     _buttons_style(position=None, cb='back')
                     buttons.button_data(f"{'🔥 ' if self.extra_data.get('boldstyle') else ''}Bold Style", f"vidtool fontstyle boldstyle {self.extra_data.get('boldstyle', False)}", 'header')
                 case 'fontname':
                     _buttons_style(name=False)
-                    [buttons.button_data(f"{'🔥 ' if btn == self.extra_data.get('fontname') else ''}{btn.replace('_', ' ')}", f'vidtool fontstyle fontname {btn}')
-                     for btn in ['Arial', 'Impact', 'Verdana', 'Consolas', 'DejaVu_Sans', 'Comic_Sans_MS', 'Simple_Day_Mistu']]
+                    for btn in ['Arial', 'Impact', 'Verdana', 'Consolas', 'DejaVu_Sans', 'Comic_Sans_MS', 'Simple_Day_Mistu']:
+                        buttons.button_data(f"{'🔥 ' if btn == self.extra_data.get('fontname') else ''}{btn.replace('_', ' ')}", f'vidtool fontstyle fontname {btn}')
                 case 'fontsize':
                     bnum = 5
                     _buttons_style(size=False)
-                    [buttons.button_data(f"{'🔥 ' if str(btn) == self.extra_data.get('fontsize') else ''}{btn}", f'vidtool fontstyle fontsize {btn}') for btn in range(11, 31)]
+                    for btn in range(11, 31):
+                        buttons.button_data(f"{'🔥 ' if str(btn) == self.extra_data.get('fontsize') else ''}{btn}", f'vidtool fontstyle fontsize {btn}')
                 case 'fontcolour':
                     bnum = 3
                     _buttons_style(colour=False)
-                    colours = [('Red', '0000ff'), ('Green', '00ff00'), ('Blue', 'ff0000'), ('Yellow', '00ffff'), ('Orange', '0054ff'), ('Purple', '005aff'),
-                               ('Soft Red', 'd470ff'), ('Soft Green', '80ff80'), ('Soft Blue', 'ffb84d'), ('Soft Yellow', '80ffff')]
-                    [buttons.button_data(f"{'🔥 ' if hexcolour == self.extra_data.get('fontcolour') else ''}{btn}", f'vidtool fontstyle fontcolour {hexcolour}') for btn, hexcolour in colours]
+                    colours = [('Red', '0000ff'), ('Green', '00ff00'), ('Blue', 'ff0000'), ('Yellow', '00ffff'), ('Orange', '0054ff'), ('Purple', '005aff')]
+                    for btn, hexcolour in colours:
+                        buttons.button_data(f"{'🔥 ' if hexcolour == self.extra_data.get('fontcolour') else ''}{btn}", f'vidtool fontstyle fontcolour {hexcolour}')
                 case 'wmposition':
                     buttons.button_data('Top Left', 'vidtool wmposition 5:5')
                     buttons.button_data('Top Right', 'vidtool wmposition main_w-overlay_w-5:5')
@@ -197,12 +199,16 @@ class SelectMode:
 
     async def get_buttons(self):
         future = self._event_handler()
-        await gather(self.list_buttons(), wrap_future(future))
-        if self.is_cancelled:
-            await editMessage(self.mode, self._reply)
-            return
-        await deleteMessage(self._reply)
-        return [self.mode, self.newname, self.extra_data]
+        try:
+            await gather(self.list_buttons(), wrap_future(future))
+            if self.is_cancelled:
+                await editMessage(self.mode, self._reply)
+                return None
+            await deleteMessage(self._reply)
+            return [self.mode, self.newname, self.extra_data]
+        except Exception as e:
+            LOGGER.error(f"Error in get_buttons: {e}")
+            return None
 
 async def message_handler(_, message: Message, obj: SelectMode, is_sub=False):
     data = None
