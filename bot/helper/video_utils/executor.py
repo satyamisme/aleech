@@ -129,7 +129,7 @@ class VidEcxecutor(FFProgress):
             elif await aiopath.isfile(self.path):
                 if (await get_document_type(self.path))[0]:
                     file_list.append(self.path)
-                elif self.path.lower().endswith('.zip'):
+                elif self.path.lower().endswith(('.zip', '.rar')):
                     extract_dir = await self._extract_zip(self.path)
                     if extract_dir:
                         for dirpath, _, files in await sync_to_async(walk, extract_dir):
@@ -143,7 +143,7 @@ class VidEcxecutor(FFProgress):
                         file_path = ospath.join(dirpath, file)
                         if (await get_document_type(file_path))[0]:
                             file_list.append(file_path)
-                        elif file_path.lower().endswith('.zip'):
+                        elif file_path.lower().endswith(('.zip', '.rar')):
                             extract_dir = await self._extract_zip(file_path)
                             if extract_dir:
                                 for sub_dirpath, _, sub_files in await sync_to_async(walk, extract_dir):
@@ -285,6 +285,7 @@ class VidEcxecutor(FFProgress):
     async def _merge_and_rmaudio(self):
         file_list = await self._get_files()
         if not file_list:
+            LOGGER.error("No valid video files found for merging.")
             await self._cleanup()
             return self._up_path
         if len(file_list) == 1:
@@ -294,48 +295,62 @@ class VidEcxecutor(FFProgress):
                 await self._cleanup()
             return result
 
-        streams, _ = await get_metavideo(file_list[0])
         self.size = sum(await gather(*[get_path_size(f) for f in file_list]))
         base_dir = await self._name_base_dir(file_list[0], 'Merge-RemoveAudio', True)
 
-        self._start_handler(streams)
-        try:
-            await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
-            if self.is_cancel or not self.data or not self.data.get('streams_to_remove', []):
-                LOGGER.warning("Merge and remove audio cancelled or no streams selected for removal.")
-                await self._cleanup()
-                return self._up_path
+        # Merge all files first
+        async with file_lock:
+            self.outfile = ospath.join(base_dir, f"temp_merge_{self._gid}.mkv")
+            self._files = file_list
+            input_file = ospath.join(self.path, f'input_{self._gid}.txt')
+            try:
+                async with aiopen(input_file, 'w') as f:
+                    await f.write('\n'.join([f"file '{f}'" for f in file_list]))
+                cmd = [FFMPEG_NAME, '-f', 'concat', '-safe', '0', '-i', input_file, '-c', 'copy', self.outfile, '-y']
+                if not await self._run_cmd(cmd, 'direct'):
+                    LOGGER.error("Failed to merge files due to incompatible formats or FFmpeg error.")
+                    await self._cleanup()
+                    return self._up_path
+            finally:
+                await clean_target(input_file)
 
-            async with file_lock:
-                self.outfile = ospath.join(base_dir, self.name)
-                self._files = file_list
-                input_file = ospath.join(self.path, f'input_{self._gid}.txt')
-                try:
-                    async with aiopen(input_file, 'w') as f:
-                        await f.write('\n'.join([f"file '{f}'" for f in file_list]))
-                    cmd = [FFMPEG_NAME, '-f', 'concat', '-safe', '0', '-i', input_file]
-                    streams_to_remove = self.data.get('streams_to_remove', [])
-                    kept_streams = [f'0:{s["index"]}' for s in self.data['streams'].values() 
-                                   if s['index'] not in streams_to_remove and s['codec_type'] != 'video']
-                    cmd.extend(['-map'] + kept_streams if kept_streams else ['-map', '0:v'])
-                    cmd.extend(('-c', 'copy', self.outfile, '-y'))
-                    if not await self._run_cmd(cmd, 'direct'):
-                        await self._cleanup()
-                        return self._up_path
-                    result = await self._final_path()
-                    if self.is_cancel or not result:
-                        await self._cleanup()
-                    return result
-                finally:
-                    await clean_target(input_file)
-        except Exception as e:
-            LOGGER.error(f"Error in _merge_and_rmaudio: {e}")
+        # Check compatibility and get streams
+        streams, _ = await get_metavideo(self.outfile)
+        if not streams:
+            LOGGER.error("Merge failed: No streams detected in merged file.")
             await self._cleanup()
             return self._up_path
+
+        # Offer track selection
+        self._start_handler(streams)
+        await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
+        if self.is_cancel or not self.data or not self.data.get('streams_to_remove', []):
+            LOGGER.warning("Merge and remove audio cancelled or no streams selected.")
+            await self._cleanup()
+            return self.outfile  # Return merged file if no removal
+
+        # Remove selected tracks
+        final_outfile = ospath.join(base_dir, self.name)
+        cmd = [FFMPEG_NAME, '-i', self.outfile]
+        kept_streams = [f'0:{s["index"]}' for s in self.data['streams'].values() 
+                        if s['index'] not in self.data['streams_to_remove'] and s['codec_type'] != 'video']
+        cmd.extend(['-map'] + kept_streams if kept_streams else ['-map', '0:v'])
+        cmd.extend(('-c', 'copy', final_outfile, '-y'))
+        if not await self._run_cmd(cmd, 'direct'):
+            LOGGER.error("Failed to remove selected tracks from merged file.")
+            await self._cleanup()
+            return self.outfile
+
+        await clean_target(self.outfile)
+        result = await self._final_path(final_outfile)
+        if self.is_cancel or not result:
+            await self._cleanup()
+        return result
 
     async def _merge_preremove_audio(self):
         file_list = await self._get_files()
         if not file_list:
+            LOGGER.error("No valid video files found for processing.")
             await self._cleanup()
             return self._up_path
         if len(file_list) == 1:
@@ -350,61 +365,69 @@ class VidEcxecutor(FFProgress):
         self.size = sum(await gather(*[get_path_size(f) for f in file_list]))
         base_dir = await self._name_base_dir(file_list[0], 'Merge-PreRemoveAudio', True)
 
-        self._start_handler(streams_per_file)
-        try:
+        # Process each file individually
+        temp_files = []
+        for file in file_list:
+            if not streams_per_file[file]:
+                LOGGER.warning(f"No streams found in {file}, skipping.")
+                continue
+            self._start_handler(streams_per_file[file])
             await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
             if self.is_cancel or not self.data:
                 await self._cleanup()
                 return self._up_path
 
-            async with file_lock:
-                temp_files = []
-                for file in file_list:
-                    outfile = ospath.join(ospath.dirname(file), f"temp_{ospath.basename(file)}_{self._gid}")
-                    selections = self.data.get('audio_selections', {}).get(file, [])
-                    if not selections:
-                        temp_files.append(file)
-                        continue
-                    cmd = [FFMPEG_NAME, '-i', file]
-                    streams = streams_per_file[file]
-                    if selections == [s['index'] for s in streams if s['codec_type'] in ['video', 'audio', 'subtitle']]:
-                        cmd.extend(('-map', '0', '-map', '-0:a'))
-                    else:
-                        kept_streams = [f'0:{s["index"]}' for s in streams if s['index'] not in selections and s['codec_type'] != 'video']
-                        cmd.extend(['-map'] + kept_streams if kept_streams else ['-map', '0:v'])
-                    cmd.extend(('-c', 'copy', outfile, '-y'))
-                    if await self._run_cmd(cmd):
-                        temp_files.append(outfile)
-                    else:
-                        await gather(*[clean_target(f) for f in temp_files])
-                        await self._cleanup()
-                        return self._up_path
+            outfile = ospath.join(base_dir, f"temp_{ospath.basename(file)}_{self._gid}")
+            cmd = [FFMPEG_NAME, '-i', file]
+            selections = self.data.get('streams_to_remove', [])
+            streams = streams_per_file[file]
+            if selections:
+                kept_streams = [f'0:{s["index"]}' for s in streams if s['index'] not in selections and s['codec_type'] != 'video']
+                cmd.extend(['-map'] + kept_streams if kept_streams else ['-map', '0:v'])
+            else:
+                cmd.extend(('-map', '0', '-map', '-0:a'))
+            cmd.extend(('-c', 'copy', outfile, '-y'))
+            if await self._run_cmd(cmd):
+                temp_files.append(outfile)
+            else:
+                LOGGER.error(f"Failed to process {file} for track removal.")
+                await gather(*[clean_target(f) for f in temp_files])
+                await self._cleanup()
+                return self._up_path
+            self.data.clear()  # Clear selections for next file
 
-                self.outfile = ospath.join(base_dir, self.name)
-                self._files = temp_files
-                input_file = ospath.join(self.path, f'input_{self._gid}.txt')
-                try:
-                    async with aiopen(input_file, 'w') as f:
-                        await f.write('\n'.join([f"file '{f}'" for f in temp_files]))
-                    cmd = [FFMPEG_NAME, '-f', 'concat', '-safe', '0', '-i', input_file, '-c', 'copy', self.outfile, '-y']
-                    if not await self._run_cmd(cmd, 'direct'):
-                        await self._cleanup()
-                        return self._up_path
-                    if not self.is_cancel:
-                        await gather(*[clean_target(f) for f in temp_files if f.startswith('temp_')])
-                    result = await self._final_path()
-                    if self.is_cancel or not result:
-                        await self._cleanup()
-                    return result
-                finally:
-                    await clean_target(input_file)
-        except Exception as e:
-            LOGGER.error(f"Error in _merge_preremove_audio: {e}")
+        if not temp_files:
+            LOGGER.error("No files processed successfully for merging.")
             await self._cleanup()
             return self._up_path
 
+        # Merge processed files
+        self.outfile = ospath.join(base_dir, self.name)
+        self._files = temp_files
+        input_file = ospath.join(self.path, f'input_{self._gid}.txt')
+        try:
+            async with aiopen(input_file, 'w') as f:
+                await f.write('\n'.join([f"file '{f}'" for f in temp_files]))
+            cmd = [FFMPEG_NAME, '-f', 'concat', '-safe', '0', '-i', input_file, '-c', 'copy', self.outfile, '-y']
+            if not await self._run_cmd(cmd, 'direct'):
+                LOGGER.error("Failed to merge processed files due to incompatible formats or FFmpeg error.")
+                await self._cleanup()
+                return self._up_path
+            if not self.is_cancel:
+                await gather(*[clean_target(f) for f in temp_files])
+            result = await self._final_path()
+            if self.is_cancel or not result:
+                await self._cleanup()
+            return result
+        finally:
+            await clean_target(input_file)
+
     async def _rm_audio_single(self):
         streams, _ = await get_metavideo(self.path)
+        if not streams:
+            LOGGER.error(f"No streams found in {self.path} for single file removal.")
+            await self._cleanup()
+            return self._up_path
         self._start_handler(streams)
         try:
             await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))

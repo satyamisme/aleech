@@ -11,7 +11,7 @@ from pyrogram.types import Message, CallbackQuery
 from re import match as re_match
 from time import time
 
-from bot import config_dict, VID_MODE
+from bot import config_dict, VID_MODE, LOGGER  # Added LOGGER import
 from bot.helper.ext_utils.bot_utils import new_task, new_thread, sync_to_async
 from bot.helper.ext_utils.files_utils import clean_target
 from bot.helper.ext_utils.links_utils import is_media
@@ -46,7 +46,7 @@ class SelectMode:
             self.is_cancelled = True
             self.event.set()
         except Exception as e:
-            LOGGER.error(f"Event handler error: {e}")
+            LOGGER.error(f"Event handler error in SelectMode: {str(e)}", exc_info=True)  # Improved logging
             self.is_cancelled = True
             self.event.set()
         finally:
@@ -61,7 +61,7 @@ class SelectMode:
         except TimeoutError:
             self.message_event.set()
         except Exception as e:
-            LOGGER.error(f"Message event handler error: {e}")
+            LOGGER.error(f"Message event handler error: {str(e)}", exc_info=True)
             self.message_event.set()
         finally:
             self.listener.client.remove_handler(*handler)
@@ -214,11 +214,14 @@ class SelectMode:
             await deleteMessage(self._reply)
             return [self.mode, self.newname, self.extra_data]
         except Exception as e:
-            LOGGER.error(f"Error in get_buttons: {e}")
+            LOGGER.error(f"Error in get_buttons: {str(e)}", exc_info=True)
             return None
 
 async def message_handler(_, message: Message, obj: SelectMode, is_sub=False):
     data = None
+    if not message.text and not is_media(message):
+        await sendMessage('Invalid input! Send text or media as required.', message)
+        return
     if obj.is_rename and message.text:
         obj.newname = message.text.strip().replace('/', '')
         obj.is_rename = False
@@ -233,14 +236,19 @@ async def message_handler(_, message: Message, obj: SelectMode, is_sub=False):
                 await sendMessage('Only image document allowed!', message)
                 return
             fpath = await message.download(ospath.join('watermark', media.file_id))
-            await sync_to_async(Image.open(fpath).convert('RGBA').save, ospath.join('watermark', f'{obj.listener.mid}.png'), 'PNG')
-            await clean_target(fpath)
-            data = 'wmsize'
+            try:
+                await sync_to_async(Image.open(fpath).convert('RGBA').save, ospath.join('watermark', f'{obj.listener.mid}.png'), 'PNG')
+                await clean_target(fpath)
+                data = 'wmsize'
+            except Exception as e:
+                LOGGER.error(f"Error processing watermark image: {e}")
+                await clean_target(fpath)
+                return
     elif obj.mode == 'trim' and message.text:
         if match := re_match(r'(\d{2}:\d{2}:\d{2})\s(\d{2}:\d{2}:\d{2})', message.text.strip()):
             obj.extra_data.update({'start_time': match.group(1), 'end_time': match.group(2)})
         else:
-            await sendMessage('Invalid trim duration format!', message)
+            await sendMessage('Invalid trim duration format! Use hh:mm:ss hh:mm:ss', message)
             return
     obj.message_event.set()
     await gather(obj.list_buttons(data), deleteMessage(message))
@@ -248,18 +256,21 @@ async def message_handler(_, message: Message, obj: SelectMode, is_sub=False):
 @new_task
 async def cb_vidtools(_, query: CallbackQuery, obj: SelectMode):
     data = query.data.split()
+    if len(data) < 2:
+        await query.answer("Invalid callback data!", show_alert=True)
+        return
     if data[1] in config_dict['DISABLE_VIDTOOLS']:
-        await query.answer(f'{VID_MODE[data[1]]} has been disabled!', True)
+        await query.answer(f'{VID_MODE[data[1]]} has been disabled!', show_alert=True)
         return
     await query.answer()
-    if data[1] == obj.mode:
+    if data[1] == obj.mode and len(data) == 2:  # Avoid redundant clicks unless sub-option provided
         return
     match data[1]:
         case 'done':
             obj.event.set()
         case 'back':
-            if obj.message_event:
-                obj.message_event.set()
+            if obj.message_event.is_set():
+                obj.message_event.clear()
             await obj.list_buttons()
         case 'cancel':
             obj.mode = 'Task has been cancelled!'
@@ -286,7 +297,11 @@ async def cb_vidtools(_, query: CallbackQuery, obj: SelectMode):
                 if len(data) == 4:
                     if not is_bold and obj.extra_data.get(mode) == data[3]:
                         return
-                    obj.extra_data[mode] = not literal_eval(data[3]) if is_bold else data[3]
+                    try:
+                        obj.extra_data[mode] = not literal_eval(data[3]) if is_bold else data[3]
+                    except ValueError:
+                        LOGGER.error(f"Invalid boldstyle value: {data[3]}")
+                        return
                 if is_bold:
                     mode = 'fontstyle'
             await obj.list_buttons(mode)
@@ -294,6 +309,9 @@ async def cb_vidtools(_, query: CallbackQuery, obj: SelectMode):
             obj.extra_data['type'] = value
             await obj.list_buttons()
         case 'wmsize' | 'wmposition' as value:
+            if len(data) < 3:
+                await query.answer(f"Missing value for {value}!", show_alert=True)
+                return
             obj.extra_data[value] = data[2]
             await obj.list_buttons('wmposition' if value == 'wmsize' else None)
         case value:

@@ -40,7 +40,7 @@ class ExtraSelect:
             self.is_cancel = True
             await self._cleanup()
         except Exception as e:
-            LOGGER.error(f"Event handler error: {e}")
+            LOGGER.error(f"Event handler error in ExtraSelect: {str(e)}", exc_info=True)
             self.is_cancel = True
             await self._cleanup()
             self.event.set()
@@ -83,7 +83,7 @@ class ExtraSelect:
                             index = stream['index']
                             self.executor.data['streams'][index] = stream
                             stream_info = self._format_stream_name(stream)
-                            self.executor.data['streams'][index]['info'] = stream_info  # Initialize without highlight
+                            self.executor.data['streams'][index]['info'] = stream_info
                 elif isinstance(streams, dict):
                     for file, file_streams in streams.items():
                         for stream in file_streams:
@@ -114,10 +114,9 @@ class ExtraSelect:
             if displayed_streams:
                 text += '\nAvailable Streams:\n'
                 for key, value in displayed_streams:
-                    is_selected = (key in ddict.get('streams_to_remove', []) if mode in ['merge_rmaudio', 'merge_preremove_audio'] 
-                                 else key in ddict.get('sdata', []) if mode == 'rmstream' else False)
-                    displayed_info = f"🔵 {value['info']}" if is_selected else value['info']
-                    buttons.button_data(displayed_info, f'extra {mode} {key}', 'footer')  # Ensure buttons are in footer for visibility
+                    is_selected = key in ddict.get('streams_to_remove', []) or key in ddict.get('sdata', [])
+                    value['info'] = f"🔵 {value['info'].replace('🔵 ', '')}" if is_selected else value['info'].replace('🔵 ', '')
+                    buttons.button_data(value['info'], f'extra {mode} {key}', 'footer')
             else:
                 text += '\nNo streams available for selection.'
 
@@ -312,40 +311,65 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                 await obj.rmstream_select(obj.executor.data.get('streams', []))
             elif mode == 'extract':
                 await obj.extract_select(obj.executor.data.get('streams', []))
+        elif data[2] == 'reset':
+            for index in obj.executor.data.get('streams_to_remove', []) + obj.executor.data.get('sdata', []):
+                obj.executor.data['streams'][index]['info'] = obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
+            obj.executor.data['streams_to_remove'] = []
+            obj.executor.data['sdata'] = []
+            await obj.update_message(*(await obj.streams_select(None, mode)))
+        elif data[2] == 'continue':
+            obj.event.set()
         elif mode == 'merge_rmaudio':
             if data[2] == 'all':
                 obj.executor.data['streams_to_remove'] = list(obj.executor.data['streams'].keys())
                 for index in obj.executor.data['streams_to_remove']:
-                    obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info']}"
-                await obj.merge_rmaudio_select(None)  # Refresh UI after selection
-                obj.event.set()
-            elif data[2] == 'continue':
-                if not obj.executor.data.get('streams_to_remove', []):
-                    LOGGER.warning("No streams selected for removal, keeping all streams.")
-                obj.event.set()
-            elif data[2] == 'reset':
-                for index in obj.executor.data.get('streams_to_remove', []):
-                    obj.executor.data['streams'][index]['info'] = obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
-                obj.executor.data['streams_to_remove'] = []
-                await obj.merge_rmaudio_select(None)  # Refresh UI after reset
+                    obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info'].replace('🔵 ', '')}"
+                await obj.merge_rmaudio_select(None)
             elif data[2] == 'reverse':
                 all_streams = list(obj.executor.data['streams'].keys())
                 obj.executor.data['streams_to_remove'] = [s for s in all_streams if s not in obj.executor.data['streams_to_remove']]
-                for index in obj.executor.data['streams']:
-                    obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info']}" if index in obj.executor.data['streams_to_remove'] else obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
-                await obj.merge_rmaudio_select(None)  # Refresh UI after reverse
+                for index in all_streams:
+                    obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info'].replace('🔵 ', '')}" if index in obj.executor.data['streams_to_remove'] else obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
+                await obj.merge_rmaudio_select(None)
             else:
                 try:
-                    stream_key = int(data[2])
+                    stream_key = int(data[2]) if mode != 'merge_preremove_audio' else data[2]
                     streams_to_remove = obj.executor.data.get('streams_to_remove', [])
                     if stream_key in streams_to_remove:
                         streams_to_remove.remove(stream_key)
                         obj.executor.data['streams'][stream_key]['info'] = obj.executor.data['streams'][stream_key]['info'].replace('🔵 ', '')
                     else:
                         streams_to_remove.append(stream_key)
-                        obj.executor.data['streams'][stream_key]['info'] = f"🔵 {obj.executor.data['streams'][stream_key]['info']}"
+                        obj.executor.data['streams'][stream_key]['info'] = f"🔵 {obj.executor.data['streams'][stream_key]['info'].replace('🔵 ', '')}"
                     obj.executor.data['streams_to_remove'] = streams_to_remove
-                    await obj.merge_rmaudio_select(None)  # Refresh UI after individual selection
+                    await obj.merge_rmaudio_select(None)
+                except (ValueError, KeyError) as e:
+                    LOGGER.error(f"Invalid stream key or data error: {e}")
+                    await obj.update_message(f"Error selecting stream {data[2]}. Please try again.", buttons.build_menu(2))
+        elif mode == 'merge_preremove_audio':
+            if data[2] == 'all':
+                obj.executor.data['streams_to_remove'] = list(obj.executor.data['streams'].keys())
+                for index in obj.executor.data['streams_to_remove']:
+                    obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info'].replace('🔵 ', '')}"
+                await obj.merge_preremove_audio_select(obj.executor.data.get('streams_per_file', {}))
+            elif data[2] == 'reverse':
+                all_streams = list(obj.executor.data['streams'].keys())
+                obj.executor.data['streams_to_remove'] = [s for s in all_streams if s not in obj.executor.data['streams_to_remove']]
+                for index in all_streams:
+                    obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info'].replace('🔵 ', '')}" if index in obj.executor.data['streams_to_remove'] else obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
+                await obj.merge_preremove_audio_select(obj.executor.data.get('streams_per_file', {}))
+            else:
+                try:
+                    stream_key = data[2]  # Keep as string for file-specific keys
+                    streams_to_remove = obj.executor.data.get('streams_to_remove', [])
+                    if stream_key in streams_to_remove:
+                        streams_to_remove.remove(stream_key)
+                        obj.executor.data['streams'][stream_key]['info'] = obj.executor.data['streams'][stream_key]['info'].replace('🔵 ', '')
+                    else:
+                        streams_to_remove.append(stream_key)
+                        obj.executor.data['streams'][stream_key]['info'] = f"🔵 {obj.executor.data['streams'][stream_key]['info'].replace('🔵 ', '')}"
+                    obj.executor.data['streams_to_remove'] = streams_to_remove
+                    await obj.merge_preremove_audio_select(obj.executor.data.get('streams_per_file', {}))
                 except (ValueError, KeyError) as e:
                     LOGGER.error(f"Invalid stream key or data error: {e}")
                     await obj.update_message(f"Error selecting stream {data[2]}. Please try again.", buttons.build_menu(2))
@@ -356,27 +380,63 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                 elif 'subtitle' in data[3].lower():
                     obj.executor.data['sdata'] = [s['index'] for s in obj.executor.data['streams'].values() if s['codec_type'] == 'subtitle']
                 for index in obj.executor.data['sdata']:
-                    obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info']}"
+                    obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info'].replace('🔵 ', '')}"
                 await obj.rmstream_select(obj.executor.data['streams'])
-            elif data[2] == 'continue':
-                if not obj.executor.data.get('sdata', []):
-                    LOGGER.warning("No streams selected for removal, keeping all streams.")
-                obj.event.set()
-            elif data[2] == 'reset':
-                for index in obj.executor.data.get('sdata', []):
-                    obj.executor.data['streams'][index]['info'] = obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
-                obj.executor.data['sdata'] = []
+            elif data[2] == 'reverse':
+                all_streams = list(obj.executor.data['streams'].keys())
+                obj.executor.data['sdata'] = [s for s in all_streams if s not in obj.executor.data.get('sdata', [])]
+                for index in all_streams:
+                    obj.executor.data['streams'][index]['info'] = f"🔵 {obj.executor.data['streams'][index]['info'].replace('🔵 ', '')}" if index in obj.executor.data['sdata'] else obj.executor.data['streams'][index]['info'].replace('🔵 ', '')
                 await obj.rmstream_select(obj.executor.data['streams'])
             else:
                 try:
                     stream_index = int(data[2])
-                    if stream_index in obj.executor.data.get('sdata', []):
-                        obj.executor.data['sdata'].remove(stream_index)
+                    sdata = obj.executor.data.get('sdata', [])
+                    if stream_index in sdata:
+                        sdata.remove(stream_index)
                         obj.executor.data['streams'][stream_index]['info'] = obj.executor.data['streams'][stream_index]['info'].replace('🔵 ', '')
                     else:
-                        obj.executor.data['sdata'].append(stream_index)
-                        obj.executor.data['streams'][stream_index]['info'] = f"🔵 {obj.executor.data['streams'][stream_index]['info']}"
+                        sdata.append(stream_index)
+                        obj.executor.data['streams'][stream_index]['info'] = f"🔵 {obj.executor.data['streams'][stream_index]['info'].replace('🔵 ', '')}"
+                    obj.executor.data['sdata'] = sdata
                     await obj.rmstream_select(obj.executor.data['streams'])
                 except (ValueError, KeyError) as e:
                     LOGGER.error(f"Invalid stream index or data error: {e}")
                     await obj.update_message(f"Error selecting stream {data[2]}. Please try again.", buttons.build_menu(2))
+        elif mode == 'extract':
+            if data[2] == 'alt':
+                obj.executor.data['alt_mode'] = not literal_eval(data[3])
+                await obj.extract_select(obj.executor.data.get('streams', []))
+            elif data[2] == 'extension':
+                ext_idx = {'video': 2, 'audio': 0, 'subtitle': 1}
+                current_ext = obj.extension[ext_idx.get(data[3], 2)]
+                obj.extension[ext_idx.get(data[3], 2)] = None if current_ext else data[3] if data[3] != 'default' else None
+                await obj.extract_select(obj.executor.data.get('streams', []))
+            elif data[2] in ['video', 'audio', 'subtitle']:
+                obj.executor.data['key'] = data[2:]
+                obj.event.set()
+            else:
+                try:
+                    stream_key = int(data[2])
+                    obj.executor.data['key'] = stream_key
+                    obj.event.set()
+                except ValueError:
+                    LOGGER.error(f"Invalid stream key for extract: {data[2]}")
+        elif mode == 'compress':
+            if data[2] != 'cancel':
+                obj.executor.data['audio'] = int(data[2])
+                obj.event.set()
+        elif mode == 'convert':
+            if data[2] != 'cancel':
+                obj.executor.data = data[2]
+                obj.event.set()
+        elif mode == 'subsync':
+            if data[2] == 'select':
+                obj.executor.data['final'][obj.status] = {'file': obj.executor.data['list'][obj.status], 'ref': obj.executor.data['list'][int(data[3])]}
+                obj.status = ''
+                await obj.subsync_select()
+            elif not obj.status and data[2].isdigit():
+                obj.status = int(data[2])
+                await obj.subsync_select()
+            elif obj.status and data[2] == 'continue':
+                obj.event.set()
