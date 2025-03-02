@@ -28,8 +28,8 @@ class ExtraSelect:
         self.is_cancel = False
         self.extension = [None, None, 'mkv']  # Default extensions: audio, subtitle, video
         self.status = ''
-        self.stream_page = {}  # Page tracking for stream pagination
-        self.current_file_index = 0  # Tracks current file in multi-file modes
+        self.stream_page = {}
+        self.current_file_index = 0
 
     @new_thread
     async def _event_handler(self):
@@ -60,7 +60,8 @@ class ExtraSelect:
         """Cleans up resources and resets the executor state."""
         async with data_lock:
             LOGGER.info(f"Cleaning up ExtraSelect for {self.executor.mode}")
-            self.executor.data.clear()
+            if self.is_cancel:  # Only clear data if explicitly cancelled
+                self.executor.data.clear()
             self.executor.is_cancel = True
             self.executor.event.set()
             if self._reply:
@@ -136,9 +137,8 @@ class ExtraSelect:
                 for i, stream in enumerate(current_streams, start=1):
                     key = f"{current_file}_{stream['index']}"
                     is_selected = key in self.executor.data['streams_to_remove']
-                    info = stream['info']
-                    if is_selected:
-                        info = f"🔵 {info.replace('🔵 ', '').replace('🔴 ', '')}"
+                    LOGGER.info(f"Checking if {key} is selected: {is_selected}, streams_to_remove: {self.executor.data['streams_to_remove']}")
+                    info = f"🔵 {stream['info'].replace('🔵 ', '').replace('🔴 ', '')}" if is_selected else stream['info'].replace('🔵 ', '').replace('🔴 ', '')
                     text += f"{i}. {info}\n"
                     buttons.button_data(f"{i}", f'extra {mode} {key}', 'footer')
                 if self.current_file_index > 0:
@@ -157,7 +157,7 @@ class ExtraSelect:
                         if file_selected:
                             text += f'<b>File: {file}</b>\n'
                             for key in file_selected:
-                                text += f"- {self.executor.data['streams'][key]['info'].replace('🔵 ', '').replace('🔴 ', '')}\n"
+                                text += f"- 🔴 {self.executor.data['streams'][key]['info'].replace('🔵 ', '').replace('🔴 ', '')}\n"
             else:
                 streams_dict = self.executor.data['streams']
                 self.stream_page.setdefault(mode, 0)
@@ -174,9 +174,10 @@ class ExtraSelect:
                         f'\n<b>Available Streams:</b>\n')
                 if displayed_streams:
                     for i, (key, value) in enumerate(displayed_streams, start=start_idx + 1):
-                        is_selected = key in self.executor.data.get('streams_to_remove', []) or key in self.executor.data.get('sdata', [])
-                        value['info'] = f"🔵 {value['info'].replace('🔵 ', '').replace('🔴 ', '')}" if is_selected else value['info'].replace('🔵 ', '').replace('🔴 ', '')
-                        text += f"{i}. {value['info']}\n"
+                        is_selected = key in self.executor.data['streams_to_remove']
+                        LOGGER.info(f"Checking if {key} is selected: {is_selected}, streams_to_remove: {self.executor.data['streams_to_remove']}")
+                        info = f"🔵 {value['info'].replace('🔵 ', '').replace('🔴 ', '')}" if is_selected else value['info'].replace('🔵 ', '').replace('🔴 ', '')
+                        text += f"{i}. {info}\n"
                         buttons.button_data(f"{i}", f'extra {mode} {key}', 'footer')
                 if total_streams > streams_per_page:
                     if page > 0:
@@ -189,12 +190,12 @@ class ExtraSelect:
                 if mode == 'rmstream':
                     buttons.button_data('All Audio', f'extra {mode} all audio', 'footer')
                     buttons.button_data('All Subtitles', f'extra {mode} all subtitle', 'footer')
-                has_selections = bool(self.executor.data.get('streams_to_remove', []) or self.executor.data.get('sdata', []))
+                has_selections = bool(self.executor.data['streams_to_remove'])
                 buttons.button_data('Continue' if not has_selections else 'Continue (Remove)', f'extra {mode} continue', 'footer')
                 buttons.button_data('Cancel', 'extra cancel', 'footer')
                 if has_selections and mode in ['merge_rmaudio', 'rmstream']:
                     text += '\n<b>Selected for Removal:</b>\n'
-                    for i, key in enumerate(self.executor.data.get('streams_to_remove', []) or self.executor.data.get('sdata', []), start=1):
+                    for i, key in enumerate(self.executor.data['streams_to_remove'], start=1):
                         if key in streams_dict:
                             text += f"{i}. 🔴 {streams_dict[key]['info'].replace('🔵 ', '').replace('🔴 ', '')}\n"
 
@@ -259,15 +260,18 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                     if key.startswith(f"{current_file}_") and key not in obj.executor.data['streams_to_remove']:
                         obj.executor.data['streams_to_remove'].append(key)
                         obj.executor.data['streams'][key]['info'] = f"🔵 {obj.executor.data['streams'][key]['info'].replace('🔵 ', '').replace('🔴 ', '')}"
+                        LOGGER.info(f"Selected all streams for {current_file}: {obj.executor.data['streams_to_remove']}")
             elif data[2] == 'deselect_all_this_file':
                 current_file = obj.executor.data['sorted_files'][obj.current_file_index]
                 obj.executor.data['streams_to_remove'] = [key for key in obj.executor.data['streams_to_remove'] if not key.startswith(f"{current_file}_")]
                 for key in obj.executor.data['streams']:
                     if key.startswith(f"{current_file}_"):
                         obj.executor.data['streams'][key]['info'] = obj.executor.data['streams'][key]['info'].replace('🔵 ', '').replace('🔴 ', '')
+                LOGGER.info(f"Deselected all streams for {current_file}: {obj.executor.data['streams_to_remove']}")
             elif data[2] == 'continue':
                 LOGGER.info(f"Continue triggered for {mode}, selections: {obj.executor.data.get('streams_to_remove', [])}")
                 obj.event.set()
+                LOGGER.info(f"Event set for {mode}, is_set: {obj.event.is_set()}")
             else:
                 try:
                     stream_key = data[2]
@@ -280,7 +284,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                         else:
                             streams_to_remove.append(stream_key)
                             obj.executor.data['streams'][stream_key]['info'] = f"🔵 {obj.executor.data['streams'][stream_key]['info'].replace('🔵 ', '').replace('🔴 ', '')}"
-                            LOGGER.info(f"Selected stream {stream_key} for {mode}")
+                            LOGGER.info(f"Selected stream {stream_key} for {mode}, streams_to_remove: {streams_to_remove}")
                 except (ValueError, KeyError) as e:
                     LOGGER.error(f"Invalid stream key or data error: {e}")
                     await obj.update_message(f"Error selecting stream {data[2]}. Please try again.", buttons.build_menu(2))
@@ -291,7 +295,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             await obj.update_message(*(await obj.streams_select(mode=mode)))
         elif data[2] == 'reset':
             LOGGER.info(f"Resetting selections for {mode}")
-            for key in obj.executor.data.get('streams_to_remove', []) + obj.executor.data.get('sdata', []):
+            for key in obj.executor.data.get('streams_to_remove', []):
                 if key in obj.executor.data['streams']:
                     obj.executor.data['streams'][key]['info'] = obj.executor.data['streams'][key]['info'].replace('🔵 ', '').replace('🔴 ', '')
             obj.executor.data['streams_to_remove'] = []
@@ -300,6 +304,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
         elif data[2] == 'continue':
             LOGGER.info(f"Continue triggered for {mode}, selections: {obj.executor.data.get('streams_to_remove', [])}")
             obj.event.set()
+            LOGGER.info(f"Event set for {mode}, is_set: {obj.event.is_set()}")
         elif mode == 'merge_rmaudio':
             if data[2] == 'all':
                 LOGGER.info(f"Selecting all streams to remove for {mode}")
@@ -323,7 +328,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
                     else:
                         streams_to_remove.append(stream_key)
                         obj.executor.data['streams'][stream_key]['info'] = f"🔵 {obj.executor.data['streams'][stream_key]['info'].replace('🔵 ', '').replace('🔴 ', '')}"
-                        LOGGER.info(f"Selected stream {stream_key} for {mode}")
+                        LOGGER.info(f"Selected stream {stream_key} for {mode}, streams_to_remove: {streams_to_remove}")
                     obj.executor.data['streams_to_remove'] = streams_to_remove
                 except (ValueError, KeyError) as e:
                     LOGGER.error(f"Invalid stream key or data error: {e}")

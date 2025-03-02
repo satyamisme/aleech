@@ -73,7 +73,8 @@ class VidEcxecutor(FFProgress):
                     if await aiopath.exists(extracted_dir):
                         await rmtree(extracted_dir, ignore_errors=True)
                         LOGGER.info(f"Removed extracted directory: {extracted_dir}")
-                self.data.clear()
+                if self.is_cancel:  # Only clear data if explicitly cancelled
+                    self.data.clear()
                 self.event.clear()
                 self.is_cancel = True
                 LOGGER.info(f"Cleanup completed for {self.mode}")
@@ -229,7 +230,7 @@ class VidEcxecutor(FFProgress):
             await self._cleanup()
             return self._up_path
         finally:
-            if self.is_cancel or 'result' not in locals() or not await result:
+            if self.is_cancel:
                 await self._cleanup()
 
     @new_task
@@ -265,7 +266,6 @@ class VidEcxecutor(FFProgress):
                     scan_dir = self._up_path if self._is_dir else ospath.split(self._up_path)[0]
                     for dirpath, _, files in await sync_to_async(walk, scan_dir):
                         for file in files:
-                            # Only keep the final output file
                             if file != ospath.basename(outfile or self.outfile):
                                 await clean_target(ospath.join(dirpath, file))
                                 LOGGER.info(f"Cleaned non-final file: {file}")
@@ -386,7 +386,7 @@ class VidEcxecutor(FFProgress):
             return self._up_path
 
         if self.is_cancel or not self.data:
-            LOGGER.warning("Merge and remove audio cancelled or no selections made.")
+            LOGGER.warning(f"Merge and remove audio cancelled or no selections made: is_cancel={self.is_cancel}, data={self.data}")
             await self._cleanup()
             return self.outfile
 
@@ -442,6 +442,7 @@ class VidEcxecutor(FFProgress):
                 await self._cleanup()
                 return self._up_path
             if self.is_cancel or not self.data:
+                LOGGER.warning(f"Cancelled or no data for {file}: is_cancel={self.is_cancel}, data={self.data}")
                 await self._cleanup()
                 return self._up_path
 
@@ -507,29 +508,32 @@ class VidEcxecutor(FFProgress):
         try:
             await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
             LOGGER.info(f"Event received in _rm_audio_single, selections: {self.data.get('streams_to_remove', [])}")
-            if self.is_cancel or not self.data:
-                await self._cleanup()
-                return self._up_path
-
-            async with file_lock:
-                base_dir = await self._name_base_dir(self.path, 'RemoveAudio')
-                self.outfile = ospath.join(base_dir, self.name)
-                cmd = [FFMPEG_NAME, '-i', self.path]
-                selections = self.data.get('streams_to_remove', [])
-                if selections:
-                    kept_streams = [f'0:{s["index"]}' for s in streams if s['index'] not in selections and s['codec_type'] != 'video']
-                    cmd.extend(['-map'] + kept_streams if kept_streams else ['-map', '0:v'])
-                else:
-                    cmd.extend(('-map', '0', '-map', '-0:a'))
-                cmd.extend(('-c', 'copy', self.outfile, '-y'))
-                if not await self._run_cmd(cmd):
-                    await self._cleanup()
-                    return self._up_path
-                return await self._final_path()
-        except Exception as e:
-            LOGGER.error(f"Error in _rm_audio_single: {e}", exc_info=True)
+        except TimeoutError:
+            LOGGER.error(f"Timeout waiting for event in _rm_audio_single")
+            self.is_cancel = True
             await self._cleanup()
             return self._up_path
+
+        if self.is_cancel or not self.data:
+            LOGGER.warning(f"Cancelled or no data: is_cancel={self.is_cancel}, data={self.data}")
+            await self._cleanup()
+            return self._up_path
+
+        async with file_lock:
+            base_dir = await self._name_base_dir(self.path, 'RemoveAudio')
+            self.outfile = ospath.join(base_dir, self.name)
+            cmd = [FFMPEG_NAME, '-i', self.path]
+            selections = self.data.get('streams_to_remove', [])
+            if selections:
+                kept_streams = [f'0:{s["index"]}' for s in streams if s['index'] not in selections and s['codec_type'] != 'video']
+                cmd.extend(['-map'] + kept_streams if kept_streams else ['-map', '0:v'])
+            else:
+                cmd.extend(('-map', '0', '-map', '-0:a'))
+            cmd.extend(('-c', 'copy', self.outfile, '-y'))
+            if not await self._run_cmd(cmd):
+                await self._cleanup()
+                return self._up_path
+            return await self._final_path()
 
     async def _merge_vids(self):
         """Merges multiple video files into one."""
@@ -768,6 +772,7 @@ class VidEcxecutor(FFProgress):
                 await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
                 await self._queue()
                 if self.is_cancel or not isinstance(self.data, dict):
+                    LOGGER.warning(f"Cancelled or invalid data: is_cancel={self.is_cancel}, data={self.data}")
                     await self._cleanup()
                     return self._up_path
 
@@ -875,6 +880,7 @@ class VidEcxecutor(FFProgress):
             await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
             await self._queue()
             if self.is_cancel or not self.data:
+                LOGGER.warning(f"Cancelled or no data: is_cancel={self.is_cancel}, data={self.data}")
                 await self._cleanup()
                 return self._up_path
 
@@ -961,6 +967,7 @@ class VidEcxecutor(FFProgress):
                 await gather(self._send_status(), wait_for(self.event.wait(), timeout=300))
                 await self._queue()
                 if self.is_cancel or not self.data:
+                    LOGGER.warning(f"Cancelled or no data: is_cancel={self.is_cancel}, data={self.data}")
                     await self._cleanup()
                     return self._up_path
 
@@ -1004,6 +1011,7 @@ class VidEcxecutor(FFProgress):
                 LOGGER.info(f"Event received in _rm_stream, selections: {self.data.get('sdata', [])}")
                 await self._queue()
                 if self.is_cancel or not self.data:
+                    LOGGER.warning(f"Cancelled or no data: is_cancel={self.is_cancel}, data={self.data}")
                     await self._cleanup()
                     return self._up_path
 
