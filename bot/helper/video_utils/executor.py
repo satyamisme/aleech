@@ -9,13 +9,13 @@ from os import path as ospath, walk
 from time import time
 
 from bot import task_dict, task_dict_lock, LOGGER, VID_MODE, FFMPEG_NAME
-from bot.helper.ext_utils.bot_utils import sync_to_async, cmd_exec, new_task
+from bot.helper.ext_utils.bot_utils import sync_to_async, cmd_exec
 from bot.helper.ext_utils.files_utils import get_path_size, clean_target
 from bot.helper.ext_utils.links_utils import get_url_name
 from bot.helper.ext_utils.media_utils import get_document_type, FFProgress
 from bot.helper.listeners import tasks_listener as task
 from bot.helper.mirror_utils.status_utils.ffmpeg_status import FFMpegStatus
-from bot.helper.telegram_helper.message_utils import sendStatusMessage
+from bot.helper.telegram_helper.message_utils import sendStatusMessage, sendMessage
 from bot.helper.video_utils.extra_selector import ExtraSelect
 
 file_lock = Lock()
@@ -24,15 +24,16 @@ io_lock = Lock()
 async def get_metavideo(video_file):
     async with io_lock:
         try:
-            stdout, stderr, rcode = await cmd_exec(['ffprobe', '-hide_banner', '-print_format', 'json', '-show_format', '-show_streams', video_file])
+            stdout, stderr, rcode = await cmd_exec(['ffprobe', '-hide_banner', '-print_format', 'json', '-show_streams', video_file])
             if rcode != 0:
                 LOGGER.error(f"ffprobe error: {stderr}")
-                return [], {}
+                return []
             from ast import literal_eval
-            return literal_eval(stdout).get('streams', []), {}
+            metadata = literal_eval(stdout)
+            return metadata.get('streams', [])
         except Exception as e:
             LOGGER.error(f"Error in get_metavideo: {e}")
-            return [], {}
+            return []
 
 class VidEcxecutor(FFProgress):
     def __init__(self, listener: task.TaskListener, path: str, gid: str, metadata=False):
@@ -45,23 +46,23 @@ class VidEcxecutor(FFProgress):
         self._metadata = metadata
         self._up_path = path
         self._gid = gid
-        self._start_time = time()
         self._files = []
         super().__init__()
-        self.is_cancel = False
-        LOGGER.info(f"Initialized VidEcxecutor for MID: {self.listener.mid}, path: {path}")
+        self.is_cancelled = False
+        LOGGER.info(f"Initialized VidEcxecutor for MID: {self.listener.mid}, path: {self.path}")
 
     async def _cleanup(self):
         async with file_lock:
             try:
-                await gather(*[clean_target(f) for f in self._files if await aiopath.exists(f)])
+                for f in self._files:
+                    if await aiopath.exists(f):
+                        await clean_target(f)
                 self._files.clear()
                 input_file = ospath.join(self.path, f'input_{self._gid}.txt')
                 if await aiopath.exists(input_file):
                     await clean_target(input_file)
-                if self.is_cancel:
+                if self.is_cancelled:
                     self.data.clear()
-                self.is_cancel = True
                 LOGGER.info(f"Cleanup completed for {self.mode}")
             except Exception as e:
                 LOGGER.error(f"Cleanup error: {e}")
@@ -100,7 +101,6 @@ class VidEcxecutor(FFProgress):
                                 LOGGER.info(f"Found media file: {file_path}")
                     if not file_list:
                         LOGGER.error(f"No valid media files in ZIP: {self.path}")
-                        await rmtree(extract_dir, ignore_errors=True)
             elif await aiopath.isfile(self.path):
                 if (await get_document_type(self.path))[0]:
                     file_list.append(self.path)
@@ -137,7 +137,7 @@ class VidEcxecutor(FFProgress):
             except Exception as e:
                 LOGGER.error(f"Invalid metadata: {e}")
                 await self._cleanup()
-                await self.listener.onDownloadError('Invalid data!')
+                await self.listener.onUploadError('Invalid data!')
                 return self._up_path
 
         try:
@@ -152,18 +152,18 @@ class VidEcxecutor(FFProgress):
             await self._cleanup()
             return self._up_path
         finally:
-            if self.is_cancel:
+            if self.is_cancelled:
                 await self._cleanup()
 
-    @new_task
     async def _start_handler(self, *args):
         LOGGER.info(f"Starting handler for {self.mode}")
-        await sleep(0.5)
+        await sleep(1)
         try:
-            await ExtraSelect(self).get_buttons(*args)
+            selector = ExtraSelect(self)
+            await selector.get_buttons(*args)
         except Exception as e:
             LOGGER.error(f"Error in _start_handler: {e}")
-            self.is_cancel = True
+            self.is_cancelled = True
             await self._cleanup()
 
     async def process_selections(self):
@@ -189,7 +189,6 @@ class VidEcxecutor(FFProgress):
                         for file in files:
                             if file != ospath.basename(outfile or self.outfile):
                                 await clean_target(ospath.join(dirpath, file))
-                                LOGGER.info(f"Cleaned non-final file: {file}")
                     all_files = [(dirpath, file) for dirpath, _, files in await sync_to_async(walk, scan_dir) for file in files]
                     if len(all_files) == 1:
                         self._up_path = ospath.join(*all_files[0])
@@ -226,17 +225,17 @@ class VidEcxecutor(FFProgress):
                 LOGGER.info(f"FFmpeg succeeded")
                 return True
             if self.listener.suproc == 'cancelled' or code == -9:
-                self.is_cancel = True
+                self.is_cancelled = True
                 LOGGER.info(f"FFmpeg cancelled")
             else:
                 error_msg = (await self.listener.suproc.stderr.read()).decode().strip()
                 LOGGER.error(f"FFmpeg error: {error_msg}")
-                self.is_cancel = True
+                self.is_cancelled = True
             await self._cleanup()
             return False
         except Exception as e:
             LOGGER.error(f"Run cmd error: {e}")
-            self.is_cancel = True
+            self.is_cancelled = True
             await self._cleanup()
             return False
 
@@ -244,7 +243,7 @@ class VidEcxecutor(FFProgress):
         file_list = await self._get_files()
         if not file_list:
             LOGGER.error("No valid video files found.")
-            await self._cleanup()
+            await sendMessage("No video files found in ZIP. Sending original file.", self.listener.message)
             return self._up_path
         if len(file_list) == 1:
             self.path = file_list[0]
@@ -264,27 +263,27 @@ class VidEcxecutor(FFProgress):
                 cmd = [FFMPEG_NAME, '-f', 'concat', '-safe', '0', '-i', input_file, '-c', 'copy', self.outfile, '-y']
                 if not await self._run_cmd(cmd, 'direct'):
                     LOGGER.error("Failed to merge files.")
-                    await self._cleanup()
+                    await sendMessage("Merging failed. Sending original ZIP.", self.listener.message)
                     return self._up_path
             except Exception as e:
                 LOGGER.error(f"Error merging: {e}")
-                await self._cleanup()
+                await sendMessage("Merging failed. Sending original ZIP.", self.listener.message)
                 return self._up_path
             finally:
                 if await aiopath.exists(input_file):
                     await clean_target(input_file)
 
-        streams, _ = await get_metavideo(self.outfile)
+        streams = await get_metavideo(self.outfile)
         if not streams:
             LOGGER.error(f"No streams in merged file: {self.outfile}")
-            await self._cleanup()
+            await sendMessage("No streams found in merged file. Sending original ZIP.", self.listener.message)
             return self._up_path
 
         await self._start_handler(streams)
-        if self.is_cancel or not self.data:
+        if self.is_cancelled or not self.data:
             LOGGER.warning(f"Cancelled or no data: {self.data}")
-            await self._cleanup()
-            return self.outfile
+            await sendMessage("Selection cancelled or failed. Sending original ZIP.", self.listener.message)
+            return self._up_path
 
         streams_to_remove = self.data.get('streams_to_remove', [])
         if not streams_to_remove:
@@ -298,8 +297,8 @@ class VidEcxecutor(FFProgress):
         cmd.extend(('-c', 'copy', final_outfile, '-y'))
         if not await self._run_cmd(cmd, 'direct'):
             LOGGER.error("Failed to remove tracks.")
-            await self._cleanup()
-            return self.outfile
+            await sendMessage("Track removal failed. Sending original ZIP.", self.listener.message)
+            return self._up_path
 
         if await aiopath.exists(self.outfile):
             await clean_target(self.outfile)
@@ -309,14 +308,14 @@ class VidEcxecutor(FFProgress):
         file_list = await self._get_files()
         if not file_list:
             LOGGER.error("No valid video files found.")
-            await self._cleanup()
+            await sendMessage("No video files found in ZIP. Sending original file.", self.listener.message)
             return self._up_path
         if len(file_list) == 1:
             self.path = file_list[0]
             return await self._rm_audio_single()
 
         stream_data = await gather(*[get_metavideo(f) for f in file_list])
-        streams_per_file = {f: streams for f, (streams, _) in zip(file_list, stream_data) if streams}
+        streams_per_file = {f: streams for f, streams in zip(file_list, stream_data) if streams}
         self.size = sum(await gather(*[get_path_size(f) for f in file_list]))
         base_dir = await self._name_base_dir(file_list[0], 'Merge-PreRemoveAudio', True)
 
@@ -326,9 +325,9 @@ class VidEcxecutor(FFProgress):
                 LOGGER.warning(f"No streams in {file}, skipping.")
                 continue
             await self._start_handler(streams_per_file[file])
-            if self.is_cancel or not self.data:
+            if self.is_cancelled or not self.data:
                 LOGGER.warning(f"Cancelled or no data for {file}: {self.data}")
-                await self._cleanup()
+                await sendMessage("Selection cancelled or failed. Sending original ZIP.", self.listener.message)
                 return self._up_path
 
             outfile = ospath.join(base_dir, f"temp_{ospath.basename(file)}_{self._gid}")
@@ -347,13 +346,13 @@ class VidEcxecutor(FFProgress):
             else:
                 LOGGER.error(f"Failed to process {file}.")
                 await gather(*[clean_target(f) for f in temp_files if await aiopath.exists(f)])
-                await self._cleanup()
+                await sendMessage("Processing failed. Sending original ZIP.", self.listener.message)
                 return self._up_path
             self.data.clear()
 
         if not temp_files:
             LOGGER.error("No files processed successfully.")
-            await self._cleanup()
+            await sendMessage("No files processed. Sending original ZIP.", self.listener.message)
             return self._up_path
 
         self.outfile = ospath.join(base_dir, self.name)
@@ -365,29 +364,29 @@ class VidEcxecutor(FFProgress):
             cmd = [FFMPEG_NAME, '-f', 'concat', '-safe', '0', '-i', input_file, '-c', 'copy', self.outfile, '-y']
             if not await self._run_cmd(cmd, 'direct'):
                 LOGGER.error("Failed to merge files.")
-                await self._cleanup()
+                await sendMessage("Merging failed. Sending original ZIP.", self.listener.message)
                 return self._up_path
-            if not self.is_cancel:
+            if not self.is_cancelled:
                 await gather(*[clean_target(f) for f in temp_files if await aiopath.exists(f)])
             return await self._final_path()
         except Exception as e:
             LOGGER.error(f"Error merging: {e}")
-            await self._cleanup()
+            await sendMessage("Merging failed. Sending original ZIP.", self.listener.message)
             return self._up_path
         finally:
             if await aiopath.exists(input_file):
                 await clean_target(input_file)
 
     async def _rm_audio_single(self):
-        streams, _ = await get_metavideo(self.path)
+        streams = await get_metavideo(self.path)
         if not streams:
             LOGGER.error(f"No streams found in {self.path}")
-            await self._cleanup()
+            await sendMessage("No streams found. Sending original file.", self.listener.message)
             return self._up_path
         await self._start_handler(streams)
-        if self.is_cancel or not self.data:
+        if self.is_cancelled or not self.data:
             LOGGER.warning(f"Cancelled or no data: {self.data}")
-            await self._cleanup()
+            await sendMessage("Selection cancelled or failed. Sending original file.", self.listener.message)
             return self._up_path
 
         base_dir = await self._name_base_dir(self.path, 'RemoveAudio')
@@ -401,6 +400,7 @@ class VidEcxecutor(FFProgress):
             cmd.extend(('-map', '0', '-map', '-0:a'))
         cmd.extend(('-c', 'copy', self.outfile, '-y'))
         if not await self._run_cmd(cmd):
-            await self._cleanup()
+            LOGGER.error("Failed to process file.")
+            await sendMessage("Processing failed. Sending original file.", self.listener.message)
             return self._up_path
         return await self._final_path()

@@ -7,7 +7,6 @@ from time import time
 import asyncio
 
 from bot import LOGGER, VID_MODE
-from bot.helper.ext_utils.bot_utils import new_thread
 from bot.helper.ext_utils.status_utils import get_readable_file_size, get_readable_time
 from bot.helper.telegram_helper.button_build import ButtonMaker
 from bot.helper.telegram_helper.message_utils import sendMessage, editMessage, deleteMessage
@@ -19,40 +18,30 @@ class ExtraSelect:
         self._time = time()
         self._reply = None
         self.executor = executor
-        self.is_cancel = False
+        self.is_cancelled = False
         self.current_file_index = 0
         self._done = False
 
-    @new_thread
     async def _event_handler(self):
         LOGGER.info(f"Starting ExtraSelect for {self.executor.mode} (MID: {self.executor.listener.mid})")
         pfunc = partial(cb_extra, obj=self)
-        handler = None
+        handler = self._listener.client.add_handler(
+            CallbackQueryHandler(pfunc, filters=regex('^extra') & user(self._listener.user_id)), group=-1)
         try:
-            handler = self._listener.client.add_handler(
-                CallbackQueryHandler(pfunc, filters=regex('^extra') & user(self._listener.user_id)), group=-1)
             while not self._done and (time() - self._time) < 180:
                 await asyncio.sleep(1)
             if not self._done:
                 LOGGER.warning(f"ExtraSelect timed out for {self.executor.mode}")
-                self.is_cancel = True
-                await self._cleanup()
+                self.is_cancelled = True
         except Exception as e:
             LOGGER.error(f"Event handler error: {str(e)}", exc_info=True)
-            self.is_cancel = True
-            await self._cleanup()
+            self.is_cancelled = True
         finally:
-            if handler:
-                self._listener.client.remove_handler(*handler)
-
-    async def _cleanup(self):
-        LOGGER.info(f"Cleaning up ExtraSelect for {self.executor.mode}")
-        if self.is_cancel:
-            self.executor.data.clear()
-            self.executor.is_cancel = True
-        if self._reply:
-            await deleteMessage(self._reply)
-            self._reply = None
+            self._listener.client.remove_handler(*handler)
+            if self.is_cancelled:
+                self.executor.is_cancelled = True
+                if self._reply:
+                    await deleteMessage(self._reply)
 
     async def update_message(self, text: str, buttons):
         try:
@@ -62,10 +51,8 @@ class ExtraSelect:
             else:
                 LOGGER.info(f"Updating ExtraSelect message for {self.executor.mode}")
                 await editMessage(text, self._reply, buttons)
-            if not self._reply:
-                LOGGER.error(f"Failed to send/update message for {self.executor.mode}")
         except Exception as e:
-            LOGGER.error(f"Failed to update message: {e}", exc_info=True)
+            LOGGER.error(f"Failed to update message: {e}")
 
     def _format_stream_name(self, stream):
         codec_type = stream.get('codec_type', 'unknown').title()
@@ -76,7 +63,7 @@ class ExtraSelect:
 
     async def streams_select(self, streams=None, mode=None):
         buttons = ButtonMaker()
-        if not self.executor.data:
+        if 'streams' not in self.executor.data:
             if not streams:
                 LOGGER.warning(f"No streams provided for {mode}")
                 return "No streams available.", buttons.build_menu(1)
@@ -108,7 +95,7 @@ class ExtraSelect:
             text = (f'<b>{VID_MODE[mode].upper()} ~ {self._listener.tag}</b>\n'
                     f'<code>{current_file}</code>\n'
                     f'Size: <b>{get_readable_file_size(self.executor.size)}</b>\n'
-                    f'\n<b>Streams for {current_file}:</b>\n')
+                    f'\n<b>Streams:</b>\n')
             for i, stream in enumerate(current_streams, start=1):
                 key = f"{current_file}_{stream['index']}"
                 is_selected = key in self.executor.data['streams_to_remove']
@@ -126,7 +113,7 @@ class ExtraSelect:
             text = (f'<b>{VID_MODE[mode].upper()} ~ {self._listener.tag}</b>\n'
                     f'<code>{self.executor.name}</code>\n'
                     f'Size: <b>{get_readable_file_size(self.executor.size)}</b>\n'
-                    f'\n<b>Available Streams:</b>\n')
+                    f'\n<b>Streams:</b>\n')
             for i, (key, value) in enumerate(streams_dict.items(), start=1):
                 is_selected = key in self.executor.data['streams_to_remove']
                 info = f"🔵 {value['info']}" if is_selected else value['info']
@@ -149,21 +136,20 @@ class ExtraSelect:
         return text, buttons.build_menu(2)
 
     async def get_buttons(self, *args):
-        LOGGER.info(f"Starting get_buttons for mode {self.executor.mode}")
+        LOGGER.info(f"Starting get_buttons for {self.executor.mode}")
         if not args or not args[0]:
-            LOGGER.error(f"No valid streams passed for {self.executor.mode}")
+            LOGGER.error(f"No valid streams passed")
+            self.is_cancelled = True
             await self._cleanup()
             return
         await self.update_message(*(await self.streams_select(*args, self.executor.mode)))
         await self._event_handler()
-        if self.is_cancel:
+        if self.is_cancelled:
             self._listener.suproc = 'cancelled'
             await self._listener.onUploadError(f'{VID_MODE[self.executor.mode]} stopped by user!')
         else:
             LOGGER.info(f"Selections completed: {self.executor.data}")
             await self.executor.process_selections()
-        if self._reply:
-            await deleteMessage(self._reply)
 
 async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
     data = query.data.split()
@@ -176,7 +162,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
 
     if data[2] == 'cancel':
         LOGGER.info(f"Cancel triggered for {mode}")
-        obj.is_cancel = True
+        obj.is_cancelled = True
         obj._done = True
     elif mode == 'merge_preremove_audio':
         if data[2] == 'prev_file':
@@ -188,13 +174,13 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             for key in obj.executor.data['streams']:
                 if key.startswith(f"{current_file}_") and key not in obj.executor.data['streams_to_remove']:
                     obj.executor.data['streams_to_remove'].append(key)
-                    LOGGER.info(f"Selected all for {current_file}: {obj.executor.data['streams_to_remove']}")
+            LOGGER.info(f"Selected all: {obj.executor.data['streams_to_remove']}")
         elif data[2] == 'reset':
             current_file = obj.executor.data['sorted_files'][obj.current_file_index]
             obj.executor.data['streams_to_remove'] = [k for k in obj.executor.data['streams_to_remove'] if not k.startswith(f"{current_file}_")]
-            LOGGER.info(f"Reset for {current_file}: {obj.executor.data['streams_to_remove']}")
+            LOGGER.info(f"Reset: {obj.executor.data['streams_to_remove']}")
         elif data[2] == 'continue':
-            LOGGER.info(f"Continue for {mode}, selections: {obj.executor.data['streams_to_remove']}")
+            LOGGER.info(f"Continue for {mode}: {obj.executor.data['streams_to_remove']}")
             obj._done = True
             return
         else:
@@ -215,7 +201,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             obj.executor.data['streams_to_remove'] = []
             LOGGER.info("Reset selections")
         elif data[2] == 'continue':
-            LOGGER.info(f"Continue for {mode}, selections: {obj.executor.data['streams_to_remove']}")
+            LOGGER.info(f"Continue for {mode}: {obj.executor.data['streams_to_remove']}")
             obj._done = True
             return
         else:
