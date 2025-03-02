@@ -25,7 +25,7 @@ class ExtraSelect:
 
     @new_thread
     async def _event_handler(self):
-        LOGGER.info(f"Starting ExtraSelect event handler for {self.executor.mode} (MID: {self.executor.listener.mid})")
+        LOGGER.info(f"Starting ExtraSelect for {self.executor.mode} (MID: {self.executor.listener.mid})")
         pfunc = partial(cb_extra, obj=self)
         handler = None
         try:
@@ -37,10 +37,8 @@ class ExtraSelect:
                 LOGGER.warning(f"ExtraSelect timed out for {self.executor.mode}")
                 self.is_cancel = True
                 await self._cleanup()
-            else:
-                LOGGER.info(f"ExtraSelect completed successfully for {self.executor.mode}")
         except Exception as e:
-            LOGGER.error(f"Event handler error in ExtraSelect: {str(e)}", exc_info=True)
+            LOGGER.error(f"Event handler error: {str(e)}", exc_info=True)
             self.is_cancel = True
             await self._cleanup()
         finally:
@@ -51,7 +49,7 @@ class ExtraSelect:
         LOGGER.info(f"Cleaning up ExtraSelect for {self.executor.mode}")
         if self.is_cancel:
             self.executor.data.clear()
-        self.executor.is_cancel = True
+            self.executor.is_cancel = True
         if self._reply:
             await deleteMessage(self._reply)
             self._reply = None
@@ -100,9 +98,6 @@ class ExtraSelect:
                             key = f"{file}_{index}"
                             self.executor.data['streams'][key] = stream
                             self.executor.data['streams'][key]['info'] = self._format_stream_name(stream)
-            else:
-                LOGGER.warning(f"Unexpected streams type for mode {mode}: {type(streams)}")
-                return "No streams available.", buttons.build_menu(1)
 
         mode = mode or self.executor.mode
         if mode == 'merge_preremove_audio' and 'sorted_files' in self.executor.data:
@@ -121,11 +116,11 @@ class ExtraSelect:
                 text += f"{i}. {info}\n"
                 buttons.button_data(f"{i}", f'extra {mode} {key}', 'footer')
             if self.current_file_index > 0:
-                buttons.button_data('Previous File', f'extra {mode} prev_file', 'footer')
+                buttons.button_data('Prev', f'extra {mode} prev_file', 'footer')
             if self.current_file_index < len(sorted_files) - 1:
-                buttons.button_data('Next File', f'extra {mode} next_file', 'footer')
+                buttons.button_data('Next', f'extra {mode} next_file', 'footer')
             buttons.button_data('Select All', f'extra {mode} all', 'header')
-            buttons.button_data('Deselect All', f'extra {mode} reset', 'header')
+            buttons.button_data('Reset', f'extra {mode} reset', 'header')
         else:  # merge_rmaudio
             streams_dict = self.executor.data['streams']
             text = (f'<b>{VID_MODE[mode].upper()} ~ {self._listener.tag}</b>\n'
@@ -138,12 +133,12 @@ class ExtraSelect:
                 text += f"{i}. {info}\n"
                 buttons.button_data(f"{i}", f'extra {mode} {key}', 'footer')
             buttons.button_data('Select All', f'extra {mode} all', 'header')
-            buttons.button_data('Deselect All', f'extra {mode} reset', 'header')
+            buttons.button_data('Reset', f'extra {mode} reset', 'header')
 
         buttons.button_data('Continue', f'extra {mode} continue', 'footer')
         buttons.button_data('Cancel', 'extra cancel', 'footer')
         if self.executor.data['streams_to_remove']:
-            text += '\n<b>Selected for Removal:</b>\n'
+            text += '\n<b>To Remove:</b>\n'
             for i, key in enumerate(self.executor.data['streams_to_remove'], start=1):
                 text += f"{i}. {self.executor.data['streams'][key]['info']}\n"
 
@@ -154,9 +149,9 @@ class ExtraSelect:
         return text, buttons.build_menu(2)
 
     async def get_buttons(self, *args):
-        LOGGER.info(f"Starting get_buttons for mode {self.executor.mode} with args: {args}")
+        LOGGER.info(f"Starting get_buttons for mode {self.executor.mode}")
         if not args or not args[0]:
-            LOGGER.error(f"No valid streams passed to get_buttons for {self.executor.mode}")
+            LOGGER.error(f"No valid streams passed for {self.executor.mode}")
             await self._cleanup()
             return
         await self.update_message(*(await self.streams_select(*args, self.executor.mode)))
@@ -165,17 +160,15 @@ class ExtraSelect:
             self._listener.suproc = 'cancelled'
             await self._listener.onUploadError(f'{VID_MODE[self.executor.mode]} stopped by user!')
         else:
-            LOGGER.info(f"Selections completed, data: {self.executor.data}")
-            await self.executor.on_selection_complete()
+            LOGGER.info(f"Selections completed: {self.executor.data}")
+            await self.executor.process_selections()
         if self._reply:
             await deleteMessage(self._reply)
-            LOGGER.info(f"Deleted reply message for {self.executor.mode}")
 
 async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
     data = query.data.split()
     if len(data) < 2:
         await query.answer("Invalid callback data!", show_alert=True)
-        LOGGER.warning(f"Invalid callback data: {query.data}")
         return
     mode = data[1]
     await query.answer()
@@ -183,8 +176,7 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
 
     if data[2] == 'cancel':
         LOGGER.info(f"Cancel triggered for {mode}")
-        obj.is_cancel = obj.executor.is_cancel = True
-        await obj._cleanup()
+        obj.is_cancel = True
         obj._done = True
     elif mode == 'merge_preremove_audio':
         if data[2] == 'prev_file':
@@ -196,53 +188,43 @@ async def cb_extra(_, query: CallbackQuery, obj: ExtraSelect):
             for key in obj.executor.data['streams']:
                 if key.startswith(f"{current_file}_") and key not in obj.executor.data['streams_to_remove']:
                     obj.executor.data['streams_to_remove'].append(key)
-            LOGGER.info(f"Selected all streams for {current_file}: {obj.executor.data['streams_to_remove']}")
+                    LOGGER.info(f"Selected all for {current_file}: {obj.executor.data['streams_to_remove']}")
         elif data[2] == 'reset':
             current_file = obj.executor.data['sorted_files'][obj.current_file_index]
             obj.executor.data['streams_to_remove'] = [k for k in obj.executor.data['streams_to_remove'] if not k.startswith(f"{current_file}_")]
-            LOGGER.info(f"Deselected all streams for {current_file}: {obj.executor.data['streams_to_remove']}")
+            LOGGER.info(f"Reset for {current_file}: {obj.executor.data['streams_to_remove']}")
         elif data[2] == 'continue':
-            LOGGER.info(f"Continue triggered for {mode}, selections: {obj.executor.data.get('streams_to_remove', [])}")
+            LOGGER.info(f"Continue for {mode}, selections: {obj.executor.data['streams_to_remove']}")
             obj._done = True
             return
         else:
-            try:
-                stream_key = data[2]
-                if stream_key in obj.executor.data['streams']:
-                    streams_to_remove = obj.executor.data['streams_to_remove']
-                    if stream_key in streams_to_remove:
-                        streams_to_remove.remove(stream_key)
-                        LOGGER.info(f"Deselected stream {stream_key} for {mode}")
-                    else:
-                        streams_to_remove.append(stream_key)
-                        LOGGER.info(f"Selected stream {stream_key} for {mode}, streams_to_remove: {streams_to_remove}")
-            except (ValueError, KeyError) as e:
-                LOGGER.error(f"Invalid stream key or data error: {e}")
-                await obj.update_message(f"Error selecting stream {data[2]}.", buttons.build_menu(2))
+            stream_key = data[2]
+            if stream_key in obj.executor.data['streams']:
+                if stream_key in obj.executor.data['streams_to_remove']:
+                    obj.executor.data['streams_to_remove'].remove(stream_key)
+                    LOGGER.info(f"Deselected {stream_key}")
+                else:
+                    obj.executor.data['streams_to_remove'].append(stream_key)
+                    LOGGER.info(f"Selected {stream_key}")
         await obj.update_message(*(await obj.streams_select(mode=mode)))
     elif mode == 'merge_rmaudio':
         if data[2] == 'all':
-            LOGGER.info(f"Selecting all streams to remove for {mode}")
             obj.executor.data['streams_to_remove'] = [int(k) for k in obj.executor.data['streams'].keys()]
+            LOGGER.info(f"Selected all: {obj.executor.data['streams_to_remove']}")
         elif data[2] == 'reset':
-            LOGGER.info(f"Resetting selections for {mode}")
             obj.executor.data['streams_to_remove'] = []
+            LOGGER.info("Reset selections")
         elif data[2] == 'continue':
-            LOGGER.info(f"Continue triggered for {mode}, selections: {obj.executor.data.get('streams_to_remove', [])}")
+            LOGGER.info(f"Continue for {mode}, selections: {obj.executor.data['streams_to_remove']}")
             obj._done = True
             return
         else:
-            try:
-                stream_key = int(data[2])
-                if stream_key in obj.executor.data['streams']:
-                    streams_to_remove = obj.executor.data['streams_to_remove']
-                    if stream_key in streams_to_remove:
-                        streams_to_remove.remove(stream_key)
-                        LOGGER.info(f"Deselected stream {stream_key} for {mode}")
-                    else:
-                        streams_to_remove.append(stream_key)
-                        LOGGER.info(f"Selected stream {stream_key} for {mode}, streams_to_remove: {streams_to_remove}")
-            except (ValueError, KeyError) as e:
-                LOGGER.error(f"Invalid stream key or data error: {e}")
-                await obj.update_message(f"Error selecting stream {data[2]}.", buttons.build_menu(2))
+            stream_key = int(data[2])
+            if stream_key in obj.executor.data['streams']:
+                if stream_key in obj.executor.data['streams_to_remove']:
+                    obj.executor.data['streams_to_remove'].remove(stream_key)
+                    LOGGER.info(f"Deselected {stream_key}")
+                else:
+                    obj.executor.data['streams_to_remove'].append(stream_key)
+                    LOGGER.info(f"Selected {stream_key}")
         await obj.update_message(*(await obj.streams_select(mode=mode)))
