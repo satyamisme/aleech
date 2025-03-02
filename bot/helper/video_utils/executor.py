@@ -282,11 +282,14 @@ class VidEcxecutor(FFProgress):
             await clean_target(temp_outfile)
             return self._up_path
 
+        # Ensure streams_to_remove is empty initially
+        self.data['streams_to_remove'] = []
+        
         # Step 3: Present streams for removal (non-video only)
         await self._start_handler(streams)
-        if self.is_cancelled or not self.data:
-            LOGGER.warning(f"Cancelled or no data: {self.data}")
-            await sendMessage("Selection cancelled or failed. Sending original ZIP.", self.listener.message)
+        if self.is_cancelled:
+            LOGGER.warning(f"Cancelled: {self.data}")
+            await sendMessage("Selection cancelled. Sending original ZIP.", self.listener.message)
             await clean_target(temp_outfile)
             return self._up_path
 
@@ -298,7 +301,6 @@ class VidEcxecutor(FFProgress):
             LOGGER.info("No streams selected to remove, keeping all tracks.")
             cmd.extend(['-map', '0:a?', '-map', '0:s?', '-c', 'copy', self.outfile, '-y'])
         else:
-            # Only allow removal of non-video streams
             kept_streams = [f'0:{s["index"]}' for s in streams if s['codec_type'] != 'video' and s['index'] not in streams_to_remove]
             cmd.extend(['-map'] + kept_streams if kept_streams else [])
             cmd.extend(('-c', 'copy', self.outfile, '-y'))
