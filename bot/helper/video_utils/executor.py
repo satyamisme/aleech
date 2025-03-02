@@ -101,15 +101,19 @@ class VidEcxecutor(FFProgress):
                                 LOGGER.info(f"Found media file: {file_path}")
                     if not file_list:
                         LOGGER.error(f"No valid media files in ZIP: {self.path}")
+                    self.size = sum(await gather(*[get_path_size(f) for f in file_list])) if file_list else 0
             elif await aiopath.isfile(self.path):
                 if (await get_document_type(self.path))[0]:
                     file_list.append(self.path)
+                    self.size = await get_path_size(self.path)
             else:
                 for dirpath, _, files in await sync_to_async(walk, self.path):
                     for file in natsorted(files):
                         file_path = ospath.join(dirpath, file)
                         if (await get_document_type(file_path))[0]:
                             file_list.append(file_path)
+                            LOGGER.info(f"Found media file: {file_path}")
+                    self.size = sum(await gather(*[get_path_size(f) for f in file_list])) if file_list else 0
             if not file_list:
                 LOGGER.error(f"No valid files found for {self.mode}")
             return file_list
@@ -123,28 +127,15 @@ class VidEcxecutor(FFProgress):
             await self._cleanup()
             return self._up_path
         LOGGER.info(f"Executing {self.mode} with name: {self.name}")
-        if not self._metadata:
-            path = await self._get_files()
-            self.path = path[0] if path else self._up_path
-            LOGGER.info(f"Adjusted path: {self.path}")
-        if self._metadata:
-            if not self.name:
-                self.name = get_url_name(self.path)
-            if not self.name.upper().endswith(('MP4', 'MKV')):
-                self.name += '.mkv'
-            try:
-                self.size = int(self._metadata[1]['size'])
-            except Exception as e:
-                LOGGER.error(f"Invalid metadata: {e}")
-                await self._cleanup()
-                await self.listener.onUploadError('Invalid data!')
-                return self._up_path
-
+        file_list = await self._get_files()
+        if not file_list:
+            await sendMessage("No video files found in ZIP. Sending original file.", self.listener.message)
+            return self._up_path
         try:
             result = {
                 'merge_rmaudio': self._merge_and_rmaudio,
                 'merge_preremove_audio': self._merge_preremove_audio,
-            }[self.mode]()
+            }[self.mode](file_list)
             LOGGER.info(f"{self.mode} completed with result: {result}")
             return await result
         except Exception as e:
@@ -239,85 +230,71 @@ class VidEcxecutor(FFProgress):
             await self._cleanup()
             return False
 
-    async def _merge_and_rmaudio(self):
-        file_list = await self._get_files()
-        if not file_list:
-            LOGGER.error("No valid video files found.")
-            await sendMessage("No video files found in ZIP. Sending original file.", self.listener.message)
-            return self._up_path
-        if len(file_list) == 1:
-            self.path = file_list[0]
-            return await self._rm_audio_single()
-
-        self.size = sum(await gather(*[get_path_size(f) for f in file_list]))
+    async def _merge_and_rmaudio(self, file_list):
         base_dir = await self._name_base_dir(file_list[0], 'Merge-RemoveAudio', True)
-
-        async with file_lock:
-            self.outfile = ospath.join(base_dir, f"temp_merge_{self._gid}.mkv")
-            self._files = file_list
-            input_file = ospath.join(base_dir, f'input_{self._gid}.txt')
-            try:
-                async with aiopen(input_file, 'w') as f:
-                    await f.write('\n'.join([f"file '{f}'" for f in file_list]))
-                LOGGER.info(f"Created input file: {input_file}")
-                cmd = [FFMPEG_NAME, '-f', 'concat', '-safe', '0', '-i', input_file, '-c', 'copy', self.outfile, '-y']
-                if not await self._run_cmd(cmd, 'direct'):
-                    LOGGER.error("Failed to merge files.")
-                    await sendMessage("Merging failed. Sending original ZIP.", self.listener.message)
-                    return self._up_path
-            except Exception as e:
-                LOGGER.error(f"Error merging: {e}")
+        
+        # Step 1: Merge all files into a temporary file
+        temp_outfile = ospath.join(base_dir, f"temp_merge_{self._gid}.mkv")
+        self._files = file_list
+        input_file = ospath.join(base_dir, f'input_{self._gid}.txt')
+        try:
+            async with aiopen(input_file, 'w') as f:
+                await f.write('\n'.join([f"file '{f}'" for f in file_list]))
+            LOGGER.info(f"Created input file: {input_file}")
+            cmd = [FFMPEG_NAME, '-f', 'concat', '-safe', '0', '-i', input_file, '-c', 'copy', temp_outfile, '-y']
+            if not await self._run_cmd(cmd, 'direct'):
+                LOGGER.error("Failed to merge files.")
                 await sendMessage("Merging failed. Sending original ZIP.", self.listener.message)
                 return self._up_path
-            finally:
-                if await aiopath.exists(input_file):
-                    await clean_target(input_file)
+        except Exception as e:
+            LOGGER.error(f"Error merging: {e}")
+            await sendMessage("Merging failed. Sending original ZIP.", self.listener.message)
+            return self._up_path
+        finally:
+            if await aiopath.exists(input_file):
+                await clean_target(input_file)
 
-        streams = await get_metavideo(self.outfile)
+        # Step 2: Get streams from merged file and allow selection
+        streams = await get_metavideo(temp_outfile)
         if not streams:
-            LOGGER.error(f"No streams in merged file: {self.outfile}")
+            LOGGER.error(f"No streams in merged file: {temp_outfile}")
             await sendMessage("No streams found in merged file. Sending original ZIP.", self.listener.message)
+            await clean_target(temp_outfile)
             return self._up_path
 
         await self._start_handler(streams)
         if self.is_cancelled or not self.data:
             LOGGER.warning(f"Cancelled or no data: {self.data}")
             await sendMessage("Selection cancelled or failed. Sending original ZIP.", self.listener.message)
+            await clean_target(temp_outfile)
             return self._up_path
 
+        # Step 3: Process selections and create final output
         streams_to_remove = self.data.get('streams_to_remove', [])
+        self.outfile = ospath.join(base_dir, self.name)
+        cmd = [FFMPEG_NAME, '-i', temp_outfile, '-map', '0:v:0']  # Only first video stream
         if not streams_to_remove:
-            LOGGER.info("No streams selected to remove.")
-            return await self._final_path(self.outfile)
-
-        final_outfile = ospath.join(base_dir, self.name)
-        cmd = [FFMPEG_NAME, '-i', self.outfile]
-        kept_streams = [f'0:{s["index"]}' for s in streams if s['index'] not in streams_to_remove and s['codec_type'] != 'video']
-        cmd.extend(['-map'] + kept_streams if kept_streams else ['-map', '0:v'])
-        cmd.extend(('-c', 'copy', final_outfile, '-y'))
+            LOGGER.info("No streams selected to remove, copying all non-video tracks.")
+            cmd.extend(['-map', '0:a?', '-map', '0:s?', '-c', 'copy', self.outfile, '-y'])
+        else:
+            kept_streams = [f'0:{s["index"]}' for s in streams if s['codec_type'] != 'video' and s['index'] not in streams_to_remove]
+            cmd.extend(['-map'] + kept_streams if kept_streams else [])
+            cmd.extend(('-c', 'copy', self.outfile, '-y'))
+        LOGGER.info(f"Executing FFmpeg remove cmd: {' '.join(cmd)}")
         if not await self._run_cmd(cmd, 'direct'):
             LOGGER.error("Failed to remove tracks.")
             await sendMessage("Track removal failed. Sending original ZIP.", self.listener.message)
+            await clean_target(temp_outfile)
             return self._up_path
 
-        if await aiopath.exists(self.outfile):
-            await clean_target(self.outfile)
-        return await self._final_path(final_outfile)
+        if await aiopath.exists(temp_outfile):
+            await clean_target(temp_outfile)
+        return await self._final_path()
 
-    async def _merge_preremove_audio(self):
-        file_list = await self._get_files()
-        if not file_list:
-            LOGGER.error("No valid video files found.")
-            await sendMessage("No video files found in ZIP. Sending original file.", self.listener.message)
-            return self._up_path
-        if len(file_list) == 1:
-            self.path = file_list[0]
-            return await self._rm_audio_single()
-
+    async def _merge_preremove_audio(self, file_list):
+        base_dir = await self._name_base_dir(file_list[0], 'Merge-PreRemoveAudio', True)
         stream_data = await gather(*[get_metavideo(f) for f in file_list])
         streams_per_file = {f: streams for f, streams in zip(file_list, stream_data) if streams}
-        self.size = sum(await gather(*[get_path_size(f) for f in file_list]))
-        base_dir = await self._name_base_dir(file_list[0], 'Merge-PreRemoveAudio', True)
 
         temp_files = []
         for file in file_list:
@@ -331,14 +308,14 @@ class VidEcxecutor(FFProgress):
                 return self._up_path
 
             outfile = ospath.join(base_dir, f"temp_{ospath.basename(file)}_{self._gid}")
-            cmd = [FFMPEG_NAME, '-i', file]
+            cmd = [FFMPEG_NAME, '-i', file, '-map', '0:v:0']  # Only first video stream
             selections = self.data.get('streams_to_remove', [])
             streams = streams_per_file[file]
             if selections:
-                kept_streams = [f'0:{s["index"]}' for s in streams if f"{file}_{s['index']}" not in selections and s['codec_type'] != 'video']
-                cmd.extend(['-map'] + kept_streams if kept_streams else ['-map', '0:v'])
+                kept_streams = [f'0:{s["index"]}' for s in streams if s['codec_type'] != 'video' and f"{file}_{s['index']}" not in selections]
+                cmd.extend(['-map'] + kept_streams if kept_streams else [])
             else:
-                cmd.extend(('-map', '0', '-map', '-0:a'))
+                cmd.extend(('-map', '0', '-map', '-0:v:1?'))  # Exclude secondary video (thumbnails)
             cmd.extend(('-c', 'copy', outfile, '-y'))
             if await self._run_cmd(cmd):
                 temp_files.append(outfile)
@@ -391,13 +368,13 @@ class VidEcxecutor(FFProgress):
 
         base_dir = await self._name_base_dir(self.path, 'RemoveAudio')
         self.outfile = ospath.join(base_dir, self.name)
-        cmd = [FFMPEG_NAME, '-i', self.path]
+        cmd = [FFMPEG_NAME, '-i', self.path, '-map', '0:v:0']  # Only first video stream
         selections = self.data.get('streams_to_remove', [])
         if selections:
-            kept_streams = [f'0:{s["index"]}' for s in streams if s['index'] not in selections and s['codec_type'] != 'video']
-            cmd.extend(['-map'] + kept_streams if kept_streams else ['-map', '0:v'])
+            kept_streams = [f'0:{s["index"]}' for s in streams if s['codec_type'] != 'video' and s['index'] not in selections]
+            cmd.extend(['-map'] + kept_streams if kept_streams else [])
         else:
-            cmd.extend(('-map', '0', '-map', '-0:a'))
+            cmd.extend(('-map', '0', '-map', '-0:v:1?'))  # Exclude secondary video (thumbnails)
         cmd.extend(('-c', 'copy', self.outfile, '-y'))
         if not await self._run_cmd(cmd):
             LOGGER.error("Failed to process file.")
